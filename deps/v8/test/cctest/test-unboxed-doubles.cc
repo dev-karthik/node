@@ -15,7 +15,7 @@
 #include "src/ic/ic.h"
 #include "src/macro-assembler.h"
 #include "test/cctest/cctest.h"
-#include "test/cctest/heap/utils-inl.h"
+#include "test/cctest/heap/heap-utils.h"
 
 using namespace v8::base;
 using namespace v8::internal;
@@ -934,7 +934,7 @@ TEST(Regress436816) {
   CHECK(object->map()->HasFastPointerLayout());
 
   // Trigger GCs and heap verification.
-  CcTest::heap()->CollectAllGarbage();
+  CcTest::CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask);
 }
 
 
@@ -991,7 +991,7 @@ TEST(DescriptorArrayTrimming) {
 
   // Call GC that should trim both |map|'s descriptor array and layout
   // descriptor.
-  CcTest::heap()->CollectAllGarbage();
+  CcTest::CollectAllGarbage(i::Heap::kFinalizeIncrementalMarkingMask);
 
   // The unused tail of the layout descriptor is now "clean" again.
   CHECK(map->layout_descriptor()->IsConsistentWithMap(*map, true));
@@ -1057,7 +1057,7 @@ TEST(DoScavenge) {
   CHECK(isolate->heap()->new_space()->Contains(*obj));
 
   // Do scavenge so that |obj| is moved to survivor space.
-  CcTest::heap()->CollectGarbage(i::NEW_SPACE);
+  CcTest::CollectGarbage(i::NEW_SPACE);
 
   // Create temp object in the new space.
   Handle<JSArray> temp = factory->NewJSArray(0, FAST_ELEMENTS);
@@ -1074,7 +1074,7 @@ TEST(DoScavenge) {
 
   // Now |obj| moves to old gen and it has a double field that looks like
   // a pointer to a from semi-space.
-  CcTest::heap()->CollectGarbage(i::NEW_SPACE, "boom");
+  CcTest::CollectGarbage(i::NEW_SPACE);
 
   CHECK(isolate->heap()->old_space()->Contains(*obj));
 
@@ -1112,7 +1112,7 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
   {
     AlwaysAllocateScope always_allocate(isolate);
     // Make sure |obj_value| is placed on an old-space evacuation candidate.
-    SimulateFullSpace(old_space);
+    heap::SimulateFullSpace(old_space);
     obj_value = factory->NewJSArray(32 * KB, FAST_HOLEY_ELEMENTS, TENURED);
     ec_page = Page::FromAddress(obj_value->address());
   }
@@ -1142,7 +1142,7 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
   FLAG_stress_compaction = true;
   FLAG_manual_evacuation_candidates_selection = true;
   ec_page->SetFlag(MemoryChunk::FORCE_EVACUATION_CANDIDATE_FOR_TESTING);
-  SimulateIncrementalMarking(heap);
+  heap::SimulateIncrementalMarking(heap);
   // Disable stress compaction mode in order to let GC do scavenge.
   FLAG_stress_compaction = false;
 
@@ -1151,18 +1151,18 @@ TEST(DoScavengeWithIncrementalWriteBarrier) {
   // in compacting mode and |obj_value|'s page is an evacuation candidate).
   IncrementalMarking* marking = heap->incremental_marking();
   CHECK(marking->IsCompacting());
-  CHECK(Marking::IsBlack(Marking::MarkBitFrom(*obj)));
+  CHECK(Marking::IsBlack(ObjectMarking::MarkBitFrom(*obj)));
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
 
   // Trigger GCs so that |obj| moves to old gen.
-  heap->CollectGarbage(i::NEW_SPACE);  // in survivor space now
-  heap->CollectGarbage(i::NEW_SPACE);  // in old gen now
+  CcTest::CollectGarbage(i::NEW_SPACE);  // in survivor space now
+  CcTest::CollectGarbage(i::NEW_SPACE);  // in old gen now
 
   CHECK(isolate->heap()->old_space()->Contains(*obj));
   CHECK(isolate->heap()->old_space()->Contains(*obj_value));
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
 
-  heap->CollectGarbage(i::OLD_SPACE, "boom");
+  CcTest::CollectGarbage(i::OLD_SPACE);
 
   // |obj_value| must be evacuated.
   CHECK(!MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
@@ -1412,7 +1412,7 @@ static void TestWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   obj->RawFastDoublePropertyAtPut(double_field_index, boom_value);
 
   // Trigger GC to evacuate all candidates.
-  CcTest::heap()->CollectGarbage(NEW_SPACE, "boom");
+  CcTest::CollectGarbage(NEW_SPACE);
 
   if (check_tagged_value) {
     FieldIndex tagged_field_index =
@@ -1451,7 +1451,7 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
     CHECK(old_space->Contains(*obj));
 
     // Make sure |obj_value| is placed on an old-space evacuation candidate.
-    SimulateFullSpace(old_space);
+    heap::SimulateFullSpace(old_space);
     obj_value = factory->NewJSArray(32 * KB, FAST_HOLEY_ELEMENTS, TENURED);
     ec_page = Page::FromAddress(obj_value->address());
     CHECK_NE(ec_page, Page::FromAddress(obj->address()));
@@ -1460,15 +1460,15 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   // Heap is ready, force |ec_page| to become an evacuation candidate and
   // simulate incremental marking.
   ec_page->SetFlag(MemoryChunk::FORCE_EVACUATION_CANDIDATE_FOR_TESTING);
-  SimulateIncrementalMarking(heap);
+  heap::SimulateIncrementalMarking(heap);
 
   // Check that everything is ready for triggering incremental write barrier
   // (i.e. that both |obj| and |obj_value| are black and the marking phase is
   // still active and |obj_value|'s page is indeed an evacuation candidate).
   IncrementalMarking* marking = heap->incremental_marking();
   CHECK(marking->IsMarking());
-  CHECK(Marking::IsBlack(Marking::MarkBitFrom(*obj)));
-  CHECK(Marking::IsBlack(Marking::MarkBitFrom(*obj_value)));
+  CHECK(Marking::IsBlack(ObjectMarking::MarkBitFrom(*obj)));
+  CHECK(Marking::IsBlack(ObjectMarking::MarkBitFrom(*obj_value)));
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
 
   // Trigger incremental write barrier, which should add a slot to remembered
@@ -1491,7 +1491,7 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   obj->RawFastDoublePropertyAtPut(double_field_index, boom_value);
 
   // Trigger GC to evacuate all candidates.
-  CcTest::heap()->CollectGarbage(OLD_SPACE, "boom");
+  CcTest::CollectGarbage(OLD_SPACE);
 
   // Ensure that the values are still there and correct.
   CHECK(!MarkCompactCollector::IsOnEvacuationCandidate(*obj_value));
@@ -1504,10 +1504,12 @@ static void TestIncrementalWriteBarrier(Handle<Map> map, Handle<Map> new_map,
   CHECK_EQ(boom_value, obj->RawFastDoublePropertyAt(double_field_index));
 }
 
-
-enum WriteBarrierKind { OLD_TO_OLD_WRITE_BARRIER, OLD_TO_NEW_WRITE_BARRIER };
+enum OldToWriteBarrierKind {
+  OLD_TO_OLD_WRITE_BARRIER,
+  OLD_TO_NEW_WRITE_BARRIER
+};
 static void TestWriteBarrierObjectShiftFieldsRight(
-    WriteBarrierKind write_barrier_kind) {
+    OldToWriteBarrierKind write_barrier_kind) {
   CcTest::InitializeVM();
   Isolate* isolate = CcTest::i_isolate();
   v8::HandleScope scope(CcTest::isolate());

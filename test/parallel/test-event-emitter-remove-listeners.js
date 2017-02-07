@@ -1,13 +1,13 @@
 'use strict';
 const common = require('../common');
 const assert = require('assert');
-const events = require('events');
+const EventEmitter = require('events');
 
 function listener1() {}
 function listener2() {}
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
   ee.on('hello', listener1);
   ee.on('removeListener', common.mustCall((name, cb) => {
     assert.strictEqual(name, 'hello');
@@ -18,15 +18,15 @@ function listener2() {}
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
   ee.on('hello', listener1);
-  ee.on('removeListener', common.fail);
+  ee.on('removeListener', common.mustNotCall());
   ee.removeListener('hello', listener2);
   assert.deepStrictEqual([listener1], ee.listeners('hello'));
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
   ee.on('hello', listener1);
   ee.on('hello', listener2);
   ee.once('removeListener', common.mustCall((name, cb) => {
@@ -46,7 +46,7 @@ function listener2() {}
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
 
   function remove1() {
     common.fail('remove1 should not have been called');
@@ -67,7 +67,7 @@ function listener2() {}
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
   ee.on('hello', listener1);
   ee.on('hello', listener2);
   ee.once('removeListener', common.mustCall((name, cb) => {
@@ -87,7 +87,7 @@ function listener2() {}
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
   const listener3 = common.mustCall(() => {
     ee.removeListener('hello', listener4);
   }, 2);
@@ -106,7 +106,7 @@ function listener2() {}
 }
 
 {
-  const ee = new events.EventEmitter();
+  const ee = new EventEmitter();
 
   ee.once('hello', listener1);
   ee.on('removeListener', common.mustCall((eventName, listener) => {
@@ -114,4 +114,25 @@ function listener2() {}
     assert.strictEqual(listener, listener1);
   }));
   ee.emit('hello');
+}
+
+{
+  const ee = new EventEmitter();
+
+  assert.deepStrictEqual(ee, ee.removeListener('foo', () => {}));
+}
+
+// Verify that the removed listener must be a function
+assert.throws(() => {
+  const ee = new EventEmitter();
+
+  ee.removeListener('foo', null);
+}, /^TypeError: "listener" argument must be a function$/);
+
+{
+  const ee = new EventEmitter();
+  const listener = () => {};
+  ee._events = undefined;
+  const e = ee.removeListener('foo', listener);
+  assert.strictEqual(e, ee);
 }

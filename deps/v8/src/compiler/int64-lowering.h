@@ -9,7 +9,7 @@
 #include "src/compiler/graph.h"
 #include "src/compiler/machine-operator.h"
 #include "src/compiler/node-marker.h"
-#include "src/zone-containers.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -22,6 +22,12 @@ class Int64Lowering {
                 Signature<MachineRepresentation>* signature);
 
   void LowerGraph();
+
+  static int GetParameterCountAfterLowering(
+      Signature<MachineRepresentation>* signature);
+
+  static const int kLowerWordOffset;
+  static const int kHigherWordOffset;
 
  private:
   enum class State : uint8_t { kUnvisited, kOnStack, kVisited };
@@ -51,6 +57,7 @@ class Int64Lowering {
   bool HasReplacementHigh(Node* node);
   Node* GetReplacementHigh(Node* node);
   void PreparePhiReplacement(Node* phi);
+  void GetIndexNodes(Node* index, Node*& index_low, Node*& index_high);
 
   struct NodeState {
     Node* node;

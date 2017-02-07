@@ -120,7 +120,7 @@ function InstallGetterSetter(object, name, getter, setter, attributes) {
   SetFunctionName(setter, name, "set");
   %FunctionRemovePrototype(getter);
   %FunctionRemovePrototype(setter);
-  %DefineAccessorPropertyUnchecked(object, name, getter, setter, DONT_ENUM);
+  %DefineAccessorPropertyUnchecked(object, name, getter, setter, attributes);
   %SetNativeFlag(getter);
   %SetNativeFlag(setter);
 }
@@ -128,10 +128,10 @@ function InstallGetterSetter(object, name, getter, setter, attributes) {
 
 function OverrideFunction(object, name, f, afterInitialBootstrap) {
   %CheckIsBootstrapping();
-  %ObjectDefineProperty(object, name, { value: f,
-                                        writeable: true,
-                                        configurable: true,
-                                        enumerable: false });
+  %object_define_property(object, name, { value: f,
+                                          writeable: true,
+                                          configurable: true,
+                                          enumerable: false });
   SetFunctionName(f, name);
   if (!afterInitialBootstrap) %FunctionRemovePrototype(f);
   %SetNativeFlag(f);
@@ -182,44 +182,30 @@ function PostNatives(utils) {
   // Whitelist of exports from normal natives to experimental natives and debug.
   var expose_list = [
     "ArrayToString",
-    "ErrorToString",
+    "FormatDateToParts",
     "GetIterator",
     "GetMethod",
-    "IsNaN",
-    "MakeError",
-    "MakeRangeError",
-    "MakeTypeError",
     "MapEntries",
     "MapIterator",
     "MapIteratorNext",
     "MaxSimple",
     "MinSimple",
-    "NumberIsInteger",
-    "ObjectDefineProperty",
-    "ObserveArrayMethods",
-    "ObserveObjectMethods",
-    "PromiseChain",
-    "PromiseDeferred",
-    "PromiseResolved",
-    "RegExpSubclassExecJS",
-    "RegExpSubclassMatch",
-    "RegExpSubclassReplace",
-    "RegExpSubclassSearch",
-    "RegExpSubclassSplit",
-    "RegExpSubclassTest",
     "SetIterator",
     "SetIteratorNext",
     "SetValues",
-    "SymbolToString",
+    "ToLocaleLowerCaseI18N",
+    "ToLocaleUpperCaseI18N",
+    "ToLowerCaseI18N",
     "ToPositiveInteger",
+    "ToUpperCaseI18N",
     // From runtime:
     "is_concat_spreadable_symbol",
     "iterator_symbol",
-    "promise_status_symbol",
-    "promise_value_symbol",
     "object_freeze",
     "object_is_frozen",
     "object_is_sealed",
+    "promise_result_symbol",
+    "promise_state_symbol",
     "reflect_apply",
     "reflect_construct",
     "regexp_flags_symbol",
@@ -257,9 +243,6 @@ function PostExperimentals(utils) {
     imports_from_experimental(exports_container);
   }
 
-  utils.CreateDoubleResultArray();
-  utils.CreateDoubleResultArray = UNDEFINED;
-
   utils.Export = UNDEFINED;
   utils.PostDebug = UNDEFINED;
   utils.PostExperimentals = UNDEFINED;
@@ -271,9 +254,6 @@ function PostDebug(utils) {
   for ( ; !IS_UNDEFINED(imports); imports = imports.next) {
     imports(exports_container);
   }
-
-  utils.CreateDoubleResultArray();
-  utils.CreateDoubleResultArray = UNDEFINED;
 
   exports_container = UNDEFINED;
 

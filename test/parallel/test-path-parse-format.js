@@ -1,5 +1,5 @@
 'use strict';
-require('../common');
+const common = require('../common');
 const assert = require('assert');
 const path = require('path');
 
@@ -154,7 +154,7 @@ trailingTests.forEach(function(test) {
       failures.push('\n' + message);
   });
 });
-assert.equal(failures.length, 0, failures.join(''));
+assert.strictEqual(failures.length, 0, failures.join(''));
 
 function checkErrors(path) {
   errors.forEach(function(errorCase) {
@@ -169,13 +169,13 @@ function checkErrors(path) {
       return;
     }
 
-    assert.fail(null, null, 'should have thrown');
+    common.fail('should have thrown');
   });
 }
 
 function checkParseFormat(path, paths) {
   paths.forEach(function(element) {
-    var output = path.parse(element);
+    const output = path.parse(element);
     assert.strictEqual(typeof output.root, 'string');
     assert.strictEqual(typeof output.dir, 'string');
     assert.strictEqual(typeof output.base, 'string');

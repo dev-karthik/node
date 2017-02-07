@@ -10,24 +10,27 @@ load("test/mjsunit/wasm/wasm-module-builder.js");
 var module = (function () {
   var builder = new WasmModuleBuilder();
 
-  var sig_index = builder.addSignature([kAstI32, kAstI32, kAstI32]);
+  var sig_index = builder.addType(kSig_i_ii);
   builder.addImport("add", sig_index);
   builder.addFunction("add", sig_index)
     .addBody([
-      kExprCallImport, 0, kExprGetLocal, 0, kExprGetLocal, 1
+      kExprGetLocal, 0, kExprGetLocal, 1, kExprCallFunction, 0
     ]);
   builder.addFunction("sub", sig_index)
     .addBody([
-      kExprI32Sub, kExprGetLocal, 0, kExprGetLocal, 1
+      kExprGetLocal, 0,             // --
+      kExprGetLocal, 1,             // --
+      kExprI32Sub,                  // --
     ]);
-  builder.addFunction("main", [kAstI32, kAstI32, kAstI32, kAstI32])
+  builder.addFunction("main", kSig_i_iii)
     .addBody([
-      kExprCallIndirect, sig_index,
-      kExprGetLocal, 0,
       kExprGetLocal, 1,
-      kExprGetLocal, 2])
+      kExprGetLocal, 2,
+      kExprGetLocal, 0,
+      kExprCallIndirect, sig_index
+    ])
     .exportFunc()
-  builder.appendToFunctionTable([0, 1, 2]);
+  builder.appendToTable([1, 2, 3]);
 
   return builder.instantiate({add: function(a, b) { return a + b | 0; }});
 })();
@@ -44,3 +47,40 @@ assertEquals(19, module.exports.main(0, 12, 7));
 
 assertTraps(kTrapFuncSigMismatch, "module.exports.main(2, 12, 33)");
 assertTraps(kTrapFuncInvalid, "module.exports.main(3, 12, 33)");
+
+
+module = (function () {
+  var builder = new WasmModuleBuilder();
+
+  var sig_i_ii = builder.addType(kSig_i_ii);
+  var sig_i_i = builder.addType(kSig_i_i);
+  builder.addImport("mul", sig_i_ii);
+  builder.addFunction("add", sig_i_ii)
+    .addBody([
+      kExprGetLocal, 0,  // --
+      kExprGetLocal, 1,  // --
+      kExprI32Add        // --
+    ]);
+  builder.addFunction("popcnt", sig_i_i)
+    .addBody([
+      kExprGetLocal, 0,  // --
+      kExprI32Popcnt     // --
+    ]);
+  builder.addFunction("main", kSig_i_iii)
+    .addBody([
+      kExprGetLocal, 1,
+      kExprGetLocal, 2,
+      kExprGetLocal, 0,
+      kExprCallIndirect, sig_i_ii
+    ])
+    .exportFunc()
+  builder.appendToTable([0, 1, 2, 3]);
+
+  return builder.instantiate({mul: function(a, b) { return a * b | 0; }});
+})();
+
+assertEquals(-6, module.exports.main(0, -2, 3));
+assertEquals(99, module.exports.main(1, 22, 77));
+assertTraps(kTrapFuncSigMismatch, "module.exports.main(2, 12, 33)");
+assertTraps(kTrapFuncSigMismatch, "module.exports.main(3, 12, 33)");
+assertTraps(kTrapFuncInvalid, "module.exports.main(4, 12, 33)");

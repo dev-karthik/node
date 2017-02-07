@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/code-factory.h"
 #include "src/code-stubs.h"
+#include "src/compilation-info.h"
 #include "src/compiler.h"
-#include "src/parsing/parser.h"
-#include "src/zone.h"
-
 #include "src/compiler/common-operator.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/linkage.h"
@@ -15,6 +14,8 @@
 #include "src/compiler/operator.h"
 #include "src/compiler/pipeline.h"
 #include "src/compiler/schedule.h"
+#include "src/parsing/parse-info.h"
+#include "src/zone/zone.h"
 #include "test/cctest/cctest.h"
 
 namespace v8 {
@@ -43,7 +44,7 @@ TEST(TestLinkageCreate) {
   HandleAndZoneScope handles;
   Handle<JSFunction> function = Compile("a + b");
   ParseInfo parse_info(handles.main_zone(), function);
-  CompilationInfo info(&parse_info);
+  CompilationInfo info(&parse_info, function);
   CallDescriptor* descriptor = Linkage::ComputeIncoming(info.zone(), &info);
   CHECK(descriptor);
 }
@@ -59,7 +60,7 @@ TEST(TestLinkageJSFunctionIncoming) {
         Handle<JSFunction>::cast(v8::Utils::OpenHandle(
             *v8::Local<v8::Function>::Cast(CompileRun(sources[i]))));
     ParseInfo parse_info(handles.main_zone(), function);
-    CompilationInfo info(&parse_info);
+    CompilationInfo info(&parse_info, function);
     CallDescriptor* descriptor = Linkage::ComputeIncoming(info.zone(), &info);
     CHECK(descriptor);
 
@@ -75,7 +76,7 @@ TEST(TestLinkageJSCall) {
   HandleAndZoneScope handles;
   Handle<JSFunction> function = Compile("a + c");
   ParseInfo parse_info(handles.main_zone(), function);
-  CompilationInfo info(&parse_info);
+  CompilationInfo info(&parse_info, function);
 
   for (int i = 0; i < 32; i++) {
     CallDescriptor* descriptor = Linkage::GetJSCallDescriptor(
@@ -97,13 +98,12 @@ TEST(TestLinkageRuntimeCall) {
 TEST(TestLinkageStubCall) {
   Isolate* isolate = CcTest::InitIsolateOnce();
   Zone zone(isolate->allocator());
-  ToNumberStub stub(isolate);
-  CompilationInfo info("test", isolate, &zone, Code::ComputeFlags(Code::STUB));
-  CallInterfaceDescriptor interface_descriptor =
-      stub.GetCallInterfaceDescriptor();
+  Callable callable = CodeFactory::ToNumber(isolate);
+  CompilationInfo info(ArrayVector("test"), isolate, &zone,
+                       Code::ComputeFlags(Code::STUB));
   CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
-      isolate, &zone, interface_descriptor, stub.GetStackParameterCount(),
-      CallDescriptor::kNoFlags, Operator::kNoProperties);
+      isolate, &zone, callable.descriptor(), 0, CallDescriptor::kNoFlags,
+      Operator::kNoProperties);
   CHECK(descriptor);
   CHECK_EQ(0, static_cast<int>(descriptor->StackParameterCount()));
   CHECK_EQ(1, static_cast<int>(descriptor->ReturnCount()));

@@ -1,20 +1,19 @@
 'use strict';
-var common = require('../common');
-var assert = require('assert');
+const common = require('../common');
+const assert = require('assert');
 
 if (!common.hasCrypto) {
   common.skip('missing crypto');
   return;
 }
-var tls = require('tls');
+const tls = require('tls');
 
-var fs = require('fs');
+const fs = require('fs');
 
 
-var received = '';
-var ended = 0;
+let received = '';
 
-var server = tls.createServer({
+const server = tls.createServer({
   key: fs.readFileSync(common.fixturesDir + '/keys/agent1-key.pem'),
   cert: fs.readFileSync(common.fixturesDir + '/keys/agent1-cert.pem')
 }, function(c) {
@@ -26,20 +25,15 @@ var server = tls.createServer({
   });
 
   server.close();
-}).listen(0, function() {
-  var c = tls.connect(this.address().port, {
+}).listen(0, common.mustCall(function() {
+  const c = tls.connect(this.address().port, {
     rejectUnauthorized: false
-  }, function() {
+  }, common.mustCall(function() {
     c.on('data', function(chunk) {
       received += chunk;
     });
-    c.on('end', function() {
-      ended++;
-    });
-  });
-});
-
-process.on('exit', function() {
-  assert.equal(ended, 1);
-  assert.equal(received, 'hello world! gosh');
-});
+    c.on('end', common.mustCall(function() {
+      assert.strictEqual(received, 'hello world! gosh');
+    }));
+  }));
+}));

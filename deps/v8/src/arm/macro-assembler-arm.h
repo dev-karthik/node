@@ -19,8 +19,8 @@ const Register kReturnRegister1 = {Register::kCode_r1};
 const Register kReturnRegister2 = {Register::kCode_r2};
 const Register kJSFunctionRegister = {Register::kCode_r1};
 const Register kContextRegister = {Register::kCode_r7};
+const Register kAllocateSizeRegister = {Register::kCode_r1};
 const Register kInterpreterAccumulatorRegister = {Register::kCode_r0};
-const Register kInterpreterRegisterFileRegister = {Register::kCode_r4};
 const Register kInterpreterBytecodeOffsetRegister = {Register::kCode_r5};
 const Register kInterpreterBytecodeArrayRegister = {Register::kCode_r6};
 const Register kInterpreterDispatchTableRegister = {Register::kCode_r8};
@@ -101,10 +101,6 @@ class MacroAssembler: public Assembler {
   int CallStubSize(CodeStub* stub,
                    TypeFeedbackId ast_id = TypeFeedbackId::None(),
                    Condition cond = al);
-  static int CallSizeNotPredictableCodeSize(Isolate* isolate,
-                                            Address target,
-                                            RelocInfo::Mode rmode,
-                                            Condition cond = al);
 
   // Jump, Call, and Ret pseudo instructions implementing inter-working.
   void Jump(Register target, Condition cond = al);
@@ -114,16 +110,30 @@ class MacroAssembler: public Assembler {
   void Call(Address target, RelocInfo::Mode rmode,
             Condition cond = al,
             TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
+  void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+            TypeFeedbackId ast_id = TypeFeedbackId::None(), Condition cond = al,
+            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
   int CallSize(Handle<Code> code,
                RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
                TypeFeedbackId ast_id = TypeFeedbackId::None(),
                Condition cond = al);
-  void Call(Handle<Code> code,
-            RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
-            TypeFeedbackId ast_id = TypeFeedbackId::None(),
-            Condition cond = al,
-            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
   void Ret(Condition cond = al);
+
+  // Used for patching in calls to the deoptimizer.
+  void CallDeoptimizer(Address target);
+  static int CallDeoptimizerSize();
+
+  // Emit code that loads |parameter_index|'th parameter from the stack to
+  // the register according to the CallInterfaceDescriptor definition.
+  // |sp_to_caller_sp_offset_in_words| specifies the number of words pushed
+  // below the caller's sp.
+  template <class Descriptor>
+  void LoadParameterFromStack(
+      Register reg, typename Descriptor::ParameterIndices parameter_index,
+      int sp_to_ra_offset_in_words = 0) {
+    DCHECK(Descriptor::kPassLastArgsOnStack);
+    UNIMPLEMENTED();
+  }
 
   // Emit code to discard a non-negative number of pointer-sized elements
   // from the stack, clobbering only the sp register.
@@ -157,8 +167,6 @@ class MacroAssembler: public Assembler {
            int width,
            Condition cond = al);
   void Bfc(Register dst, Register src, int lsb, int width, Condition cond = al);
-  void Usat(Register dst, int satpos, const Operand& src,
-            Condition cond = al);
 
   void Call(Label* target);
   void Push(Register src) { push(src); }
@@ -174,7 +182,8 @@ class MacroAssembler: public Assembler {
       mov(dst, src, sbit, cond);
     }
   }
-  void Move(DwVfpRegister dst, DwVfpRegister src);
+  void Move(SwVfpRegister dst, SwVfpRegister src, Condition cond = al);
+  void Move(DwVfpRegister dst, DwVfpRegister src, Condition cond = al);
 
   void Load(Register dst, const MemOperand& src, Representation r);
   void Store(Register src, const MemOperand& dst, Representation r);
@@ -489,15 +498,6 @@ class MacroAssembler: public Assembler {
             const MemOperand& dst,
             Condition cond = al);
 
-  // Ensure that FPSCR contains values needed by JavaScript.
-  // We need the NaNModeControlBit to be sure that operations like
-  // vadd and vsub generate the Canonical NaN (if a NaN must be generated).
-  // In VFP3 it will be always the Canonical NaN.
-  // In VFP2 it will be either the Canonical NaN or the negative version
-  // of the Canonical NaN. It doesn't matter if we have two values. The aim
-  // is to be sure to never generate the hole NaN.
-  void VFPEnsureFPSCRState(Register scratch);
-
   // If the value is a NaN, canonicalize the value else, do nothing.
   void VFPCanonicalizeNaN(const DwVfpRegister dst,
                           const DwVfpRegister src,
@@ -602,7 +602,8 @@ class MacroAssembler: public Assembler {
 
   // Enter exit frame.
   // stack_space - extra stack space, used for alignment before call to C.
-  void EnterExitFrame(bool save_doubles, int stack_space = 0);
+  void EnterExitFrame(bool save_doubles, int stack_space = 0,
+                      StackFrame::Type frame_type = StackFrame::EXIT);
 
   // Leave the current exit frame. Expects the return value in r0.
   // Expect the number of values, pushed prior to the exit frame, to
@@ -792,6 +793,15 @@ class MacroAssembler: public Assembler {
   void Allocate(Register object_size, Register result, Register result_end,
                 Register scratch, Label* gc_required, AllocationFlags flags);
 
+  // FastAllocate is right now only used for folded allocations. It just
+  // increments the top pointer without checking against limit. This can only
+  // be done if it was proved earlier that the allocation will succeed.
+  void FastAllocate(int object_size, Register result, Register scratch1,
+                    Register scratch2, AllocationFlags flags);
+
+  void FastAllocate(Register object_size, Register result, Register result_end,
+                    Register scratch, AllocationFlags flags);
+
   void AllocateTwoByteString(Register result,
                              Register length,
                              Register scratch1,
@@ -826,7 +836,6 @@ class MacroAssembler: public Assembler {
                           Register scratch2,
                           Register heap_number_map,
                           Label* gc_required,
-                          TaggingMode tagging_mode = TAG_RESULT,
                           MutableMode mode = IMMUTABLE);
   void AllocateHeapNumberWithValue(Register result,
                                    DwVfpRegister value,
@@ -1085,6 +1094,32 @@ class MacroAssembler: public Assembler {
   // values to location, restoring [d0..(d15|d31)].
   void RestoreFPRegs(Register location, Register scratch);
 
+  // Perform a floating-point min or max operation with the
+  // (IEEE-754-compatible) semantics of ARM64's fmin/fmax. Some cases, typically
+  // NaNs or +/-0.0, are expected to be rare and are handled in out-of-line
+  // code. The specific behaviour depends on supported instructions.
+  //
+  // These functions assume (and assert) that !left.is(right). It is permitted
+  // for the result to alias either input register.
+  void FloatMax(SwVfpRegister result, SwVfpRegister left, SwVfpRegister right,
+                Label* out_of_line);
+  void FloatMin(SwVfpRegister result, SwVfpRegister left, SwVfpRegister right,
+                Label* out_of_line);
+  void FloatMax(DwVfpRegister result, DwVfpRegister left, DwVfpRegister right,
+                Label* out_of_line);
+  void FloatMin(DwVfpRegister result, DwVfpRegister left, DwVfpRegister right,
+                Label* out_of_line);
+
+  // Generate out-of-line cases for the macros above.
+  void FloatMaxOutOfLine(SwVfpRegister result, SwVfpRegister left,
+                         SwVfpRegister right);
+  void FloatMinOutOfLine(SwVfpRegister result, SwVfpRegister left,
+                         SwVfpRegister right);
+  void FloatMaxOutOfLine(DwVfpRegister result, DwVfpRegister left,
+                         DwVfpRegister right);
+  void FloatMinOutOfLine(DwVfpRegister result, DwVfpRegister left,
+                         DwVfpRegister right);
+
   // ---------------------------------------------------------------------------
   // Runtime calls
 
@@ -1170,7 +1205,8 @@ class MacroAssembler: public Assembler {
   void MovFromFloatResult(DwVfpRegister dst);
 
   // Jump to a runtime routine.
-  void JumpToExternalReference(const ExternalReference& builtin);
+  void JumpToExternalReference(const ExternalReference& builtin,
+                               bool builtin_exit_frame = false);
 
   Handle<Object> CodeObject() {
     DCHECK(!code_object_.is_null());
@@ -1326,6 +1362,10 @@ class MacroAssembler: public Assembler {
   // enabled via --debug-code.
   void AssertBoundFunction(Register object);
 
+  // Abort execution if argument is not a JSGeneratorObject,
+  // enabled via --debug-code.
+  void AssertGeneratorObject(Register object);
+
   // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
   void AssertReceiver(Register object);
 
@@ -1436,6 +1476,9 @@ class MacroAssembler: public Assembler {
   // Returns the pc offset at which the frame ends.
   int LeaveFrame(StackFrame::Type type);
 
+  void EnterBuiltinFrame(Register context, Register target, Register argc);
+  void LeaveBuiltinFrame(Register context, Register target, Register argc);
+
   // Expects object in r0 and returns map with validated enum cache
   // in r0.  Assumes that any other register can be used as a scratch.
   void CheckEnumCache(Label* call_runtime);
@@ -1508,6 +1551,16 @@ class MacroAssembler: public Assembler {
   MemOperand SafepointRegisterSlot(Register reg);
   MemOperand SafepointRegistersAndDoublesSlot(Register reg);
 
+  // Implementation helpers for FloatMin and FloatMax.
+  template <typename T>
+  void FloatMaxHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMinHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMaxOutOfLineHelper(T result, T left, T right);
+  template <typename T>
+  void FloatMinOutOfLineHelper(T result, T left, T right);
+
   bool generating_stub_;
   bool has_frame_;
   // This handle will be patched with the code object on installation.
@@ -1568,16 +1621,7 @@ inline MemOperand NativeContextMemOperand() {
   return ContextMemOperand(cp, Context::NATIVE_CONTEXT_INDEX);
 }
 
-
-#ifdef GENERATED_CODE_COVERAGE
-#define CODE_COVERAGE_STRINGIFY(x) #x
-#define CODE_COVERAGE_TOSTRING(x) CODE_COVERAGE_STRINGIFY(x)
-#define __FILE_LINE__ __FILE__ ":" CODE_COVERAGE_TOSTRING(__LINE__)
-#define ACCESS_MASM(masm) masm->stop(__FILE_LINE__); masm->
-#else
 #define ACCESS_MASM(masm) masm->
-#endif
-
 
 }  // namespace internal
 }  // namespace v8

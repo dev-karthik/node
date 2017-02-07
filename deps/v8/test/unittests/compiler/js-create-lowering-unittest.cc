@@ -4,6 +4,7 @@
 
 #include "src/compiler/js-create-lowering.h"
 #include "src/code-factory.h"
+#include "src/compilation-dependencies.h"
 #include "src/compiler/access-builder.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-operator.h"
@@ -39,7 +40,8 @@ class JSCreateLoweringTest : public TypedGraphTest {
     // TODO(titzer): mock the GraphReducer here for better unit testing.
     GraphReducer graph_reducer(zone(), graph());
     JSCreateLowering reducer(&graph_reducer, &deps_, &jsgraph,
-                             MaybeHandle<LiteralsArray>(), zone());
+                             MaybeHandle<LiteralsArray>(),
+                             MaybeHandle<Context>(), zone());
     return reducer.Reduce(node);
   }
 
@@ -80,95 +82,74 @@ TEST_F(JSCreateLoweringTest, JSCreate) {
 // -----------------------------------------------------------------------------
 // JSCreateArguments
 
-TEST_F(JSCreateLoweringTest, JSCreateArgumentsViaStub) {
-  Node* const closure = Parameter(Type::Any());
-  Node* const context = UndefinedConstant();
-  Node* const effect = graph()->start();
-  Node* const control = graph()->start();
-  Handle<SharedFunctionInfo> shared(isolate()->object_function()->shared());
-  Node* const frame_state = FrameState(shared, graph()->start());
-  Reduction r = Reduce(graph()->NewNode(
-      javascript()->CreateArguments(CreateArgumentsType::kUnmappedArguments),
-      closure, context, frame_state, effect, control));
-  ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(
-      r.replacement(),
-      IsCall(_, IsHeapConstant(
-                    CodeFactory::FastNewStrictArguments(isolate()).code()),
-             closure, context, frame_state, effect, control));
-}
-
-TEST_F(JSCreateLoweringTest, JSCreateArgumentsRestParameterViaStub) {
-  Node* const closure = Parameter(Type::Any());
-  Node* const context = UndefinedConstant();
-  Node* const effect = graph()->start();
-  Node* const control = graph()->start();
-  Handle<SharedFunctionInfo> shared(isolate()->object_function()->shared());
-  Node* const frame_state = FrameState(shared, graph()->start());
-  Reduction r = Reduce(graph()->NewNode(
-      javascript()->CreateArguments(CreateArgumentsType::kRestParameter),
-      closure, context, frame_state, effect, control));
-  ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(
-      r.replacement(),
-      IsCall(_, IsHeapConstant(
-                    CodeFactory::FastNewRestParameter(isolate()).code()),
-             closure, context, frame_state, effect, control));
-}
-
 TEST_F(JSCreateLoweringTest, JSCreateArgumentsInlinedMapped) {
   Node* const closure = Parameter(Type::Any());
   Node* const context = UndefinedConstant();
   Node* const effect = graph()->start();
-  Node* const control = graph()->start();
   Handle<SharedFunctionInfo> shared(isolate()->object_function()->shared());
   Node* const frame_state_outer = FrameState(shared, graph()->start());
   Node* const frame_state_inner = FrameState(shared, frame_state_outer);
   Reduction r = Reduce(graph()->NewNode(
       javascript()->CreateArguments(CreateArgumentsType::kMappedArguments),
-      closure, context, frame_state_inner, effect, control));
+      closure, context, frame_state_inner, effect));
   ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(),
-              IsFinishRegion(
-                  IsAllocate(IsNumberConstant(JSSloppyArgumentsObject::kSize),
-                             _, control),
-                  _));
+  EXPECT_THAT(
+      r.replacement(),
+      IsFinishRegion(
+          IsAllocate(IsNumberConstant(JSSloppyArgumentsObject::kSize), _, _),
+          _));
 }
 
 TEST_F(JSCreateLoweringTest, JSCreateArgumentsInlinedUnmapped) {
   Node* const closure = Parameter(Type::Any());
   Node* const context = UndefinedConstant();
   Node* const effect = graph()->start();
-  Node* const control = graph()->start();
   Handle<SharedFunctionInfo> shared(isolate()->object_function()->shared());
   Node* const frame_state_outer = FrameState(shared, graph()->start());
   Node* const frame_state_inner = FrameState(shared, frame_state_outer);
   Reduction r = Reduce(graph()->NewNode(
       javascript()->CreateArguments(CreateArgumentsType::kUnmappedArguments),
-      closure, context, frame_state_inner, effect, control));
+      closure, context, frame_state_inner, effect));
   ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(),
-              IsFinishRegion(
-                  IsAllocate(IsNumberConstant(JSStrictArgumentsObject::kSize),
-                             _, control),
-                  _));
+  EXPECT_THAT(
+      r.replacement(),
+      IsFinishRegion(
+          IsAllocate(IsNumberConstant(JSStrictArgumentsObject::kSize), _, _),
+          _));
 }
 
 TEST_F(JSCreateLoweringTest, JSCreateArgumentsInlinedRestArray) {
   Node* const closure = Parameter(Type::Any());
   Node* const context = UndefinedConstant();
   Node* const effect = graph()->start();
-  Node* const control = graph()->start();
   Handle<SharedFunctionInfo> shared(isolate()->object_function()->shared());
   Node* const frame_state_outer = FrameState(shared, graph()->start());
   Node* const frame_state_inner = FrameState(shared, frame_state_outer);
   Reduction r = Reduce(graph()->NewNode(
       javascript()->CreateArguments(CreateArgumentsType::kRestParameter),
-      closure, context, frame_state_inner, effect, control));
+      closure, context, frame_state_inner, effect));
+  ASSERT_TRUE(r.Changed());
+  EXPECT_THAT(
+      r.replacement(),
+      IsFinishRegion(IsAllocate(IsNumberConstant(JSArray::kSize), _, _), _));
+}
+
+// -----------------------------------------------------------------------------
+// JSCreateClosure
+
+TEST_F(JSCreateLoweringTest, JSCreateClosureViaInlinedAllocation) {
+  Node* const context = UndefinedConstant();
+  Node* const effect = graph()->start();
+  Node* const control = graph()->start();
+  Handle<SharedFunctionInfo> shared(isolate()->number_function()->shared());
+  Reduction r =
+      Reduce(graph()->NewNode(javascript()->CreateClosure(shared, NOT_TENURED),
+                              context, effect, control));
   ASSERT_TRUE(r.Changed());
   EXPECT_THAT(r.replacement(),
-              IsFinishRegion(
-                  IsAllocate(IsNumberConstant(JSArray::kSize), _, control), _));
+              IsFinishRegion(IsAllocate(IsNumberConstant(JSFunction::kSize),
+                                        IsBeginRegion(_), control),
+                             _));
 }
 
 // -----------------------------------------------------------------------------
@@ -194,14 +175,15 @@ TEST_F(JSCreateLoweringTest, JSCreateFunctionContextViaInlinedAllocation) {
 // JSCreateWithContext
 
 TEST_F(JSCreateLoweringTest, JSCreateWithContext) {
+  Handle<ScopeInfo> scope_info(factory()->NewScopeInfo(1));
   Node* const object = Parameter(Type::Receiver());
   Node* const closure = Parameter(Type::Function());
   Node* const context = Parameter(Type::Any());
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
   Reduction r =
-      Reduce(graph()->NewNode(javascript()->CreateWithContext(), object,
-                              closure, context, effect, control));
+      Reduce(graph()->NewNode(javascript()->CreateWithContext(scope_info),
+                              object, closure, context, effect, control));
   ASSERT_TRUE(r.Changed());
   EXPECT_THAT(r.replacement(),
               IsFinishRegion(IsAllocate(IsNumberConstant(Context::SizeFor(
@@ -215,14 +197,15 @@ TEST_F(JSCreateLoweringTest, JSCreateWithContext) {
 
 TEST_F(JSCreateLoweringTest, JSCreateCatchContext) {
   Handle<String> name = factory()->length_string();
+  Handle<ScopeInfo> scope_info(factory()->NewScopeInfo(1));
   Node* const exception = Parameter(Type::Receiver());
   Node* const closure = Parameter(Type::Function());
   Node* const context = Parameter(Type::Any());
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  Reduction r =
-      Reduce(graph()->NewNode(javascript()->CreateCatchContext(name), exception,
-                              closure, context, effect, control));
+  Reduction r = Reduce(
+      graph()->NewNode(javascript()->CreateCatchContext(name, scope_info),
+                       exception, closure, context, effect, control));
   ASSERT_TRUE(r.Changed());
   EXPECT_THAT(r.replacement(),
               IsFinishRegion(IsAllocate(IsNumberConstant(Context::SizeFor(

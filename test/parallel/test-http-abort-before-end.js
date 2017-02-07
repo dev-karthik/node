@@ -1,14 +1,12 @@
 'use strict';
-require('../common');
-var http = require('http');
-var assert = require('assert');
+const common = require('../common');
+const http = require('http');
+const assert = require('assert');
 
-var server = http.createServer(function(req, res) {
-  assert(false); // should not be called
-});
+const server = http.createServer(common.mustNotCall());
 
 server.listen(0, function() {
-  var req = http.request({
+  const req = http.request({
     method: 'GET',
     host: '127.0.0.1',
     port: this.address().port

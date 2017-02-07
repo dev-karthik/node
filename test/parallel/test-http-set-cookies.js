@@ -1,12 +1,12 @@
 'use strict';
 require('../common');
-var assert = require('assert');
-var http = require('http');
+const assert = require('assert');
+const http = require('http');
 
-var nresponses = 0;
+let nresponses = 0;
 
-var server = http.createServer(function(req, res) {
-  if (req.url == '/one') {
+const server = http.createServer(function(req, res) {
+  if (req.url === '/one') {
     res.writeHead(200, [['set-cookie', 'A'],
                         ['content-type', 'text/plain']]);
     res.end('one\n');
@@ -27,14 +27,14 @@ server.on('listening', function() {
     // set-cookie headers are always return in an array.
     // even if there is only one.
     assert.deepStrictEqual(['A'], res.headers['set-cookie']);
-    assert.equal('text/plain', res.headers['content-type']);
+    assert.strictEqual('text/plain', res.headers['content-type']);
 
     res.on('data', function(chunk) {
       console.log(chunk.toString());
     });
 
     res.on('end', function() {
-      if (++nresponses == 2) {
+      if (++nresponses === 2) {
         server.close();
       }
     });
@@ -44,14 +44,14 @@ server.on('listening', function() {
 
   http.get({ port: this.address().port, path: '/two' }, function(res) {
     assert.deepStrictEqual(['A', 'B'], res.headers['set-cookie']);
-    assert.equal('text/plain', res.headers['content-type']);
+    assert.strictEqual('text/plain', res.headers['content-type']);
 
     res.on('data', function(chunk) {
       console.log(chunk.toString());
     });
 
     res.on('end', function() {
-      if (++nresponses == 2) {
+      if (++nresponses === 2) {
         server.close();
       }
     });
@@ -60,5 +60,5 @@ server.on('listening', function() {
 });
 
 process.on('exit', function() {
-  assert.equal(2, nresponses);
+  assert.strictEqual(2, nresponses);
 });

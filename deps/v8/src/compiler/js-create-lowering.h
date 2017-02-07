@@ -31,11 +31,12 @@ class JSCreateLowering final : public AdvancedReducer {
  public:
   JSCreateLowering(Editor* editor, CompilationDependencies* dependencies,
                    JSGraph* jsgraph, MaybeHandle<LiteralsArray> literals_array,
-                   Zone* zone)
+                   MaybeHandle<Context> native_context, Zone* zone)
       : AdvancedReducer(editor),
         dependencies_(dependencies),
         jsgraph_(jsgraph),
         literals_array_(literals_array),
+        native_context_(native_context),
         zone_(zone) {}
   ~JSCreateLowering() final {}
 
@@ -45,6 +46,7 @@ class JSCreateLowering final : public AdvancedReducer {
   Reduction ReduceJSCreate(Node* node);
   Reduction ReduceJSCreateArguments(Node* node);
   Reduction ReduceJSCreateArray(Node* node);
+  Reduction ReduceJSCreateClosure(Node* node);
   Reduction ReduceJSCreateIterResultObject(Node* node);
   Reduction ReduceJSCreateLiteral(Node* node);
   Reduction ReduceJSCreateFunctionContext(Node* node);
@@ -71,8 +73,12 @@ class JSCreateLowering final : public AdvancedReducer {
                                     PretenureFlag pretenure,
                                     AllocationSiteUsageContext* site_context);
 
+  Reduction ReduceNewArrayToStubCall(Node* node, Handle<AllocationSite> site);
+
   // Infers the LiteralsArray to use for a given {node}.
   MaybeHandle<LiteralsArray> GetSpecializationLiterals(Node* node);
+  // Infers the native context to use for a given {node}.
+  MaybeHandle<Context> GetSpecializationNativeContext(Node* node);
 
   Factory* factory() const;
   Graph* graph() const;
@@ -88,6 +94,7 @@ class JSCreateLowering final : public AdvancedReducer {
   CompilationDependencies* const dependencies_;
   JSGraph* const jsgraph_;
   MaybeHandle<LiteralsArray> const literals_array_;
+  MaybeHandle<Context> const native_context_;
   Zone* const zone_;
 };
 

@@ -4,6 +4,8 @@
 
 #include "src/interpreter/bytecode-array-iterator.h"
 
+#include "src/interpreter/bytecode-decoder.h"
+#include "src/interpreter/interpreter-intrinsics.h"
 #include "src/objects-inl.h"
 
 namespace v8 {
@@ -69,8 +71,8 @@ uint32_t BytecodeArrayIterator::GetUnsignedOperand(
       current_prefix_offset() +
       Bytecodes::GetOperandOffset(current_bytecode(), operand_index,
                                   current_operand_scale());
-  return Bytecodes::DecodeUnsignedOperand(operand_start, operand_type,
-                                          current_operand_scale());
+  return BytecodeDecoder::DecodeUnsignedOperand(operand_start, operand_type,
+                                                current_operand_scale());
 }
 
 int32_t BytecodeArrayIterator::GetSignedOperand(
@@ -85,14 +87,21 @@ int32_t BytecodeArrayIterator::GetSignedOperand(
       current_prefix_offset() +
       Bytecodes::GetOperandOffset(current_bytecode(), operand_index,
                                   current_operand_scale());
-  return Bytecodes::DecodeSignedOperand(operand_start, operand_type,
-                                        current_operand_scale());
+  return BytecodeDecoder::DecodeSignedOperand(operand_start, operand_type,
+                                              current_operand_scale());
 }
 
 uint32_t BytecodeArrayIterator::GetFlagOperand(int operand_index) const {
   DCHECK_EQ(Bytecodes::GetOperandType(current_bytecode(), operand_index),
             OperandType::kFlag8);
   return GetUnsignedOperand(operand_index, OperandType::kFlag8);
+}
+
+uint32_t BytecodeArrayIterator::GetUnsignedImmediateOperand(
+    int operand_index) const {
+  DCHECK_EQ(Bytecodes::GetOperandType(current_bytecode(), operand_index),
+            OperandType::kUImm);
+  return GetUnsignedOperand(operand_index, OperandType::kUImm);
 }
 
 int32_t BytecodeArrayIterator::GetImmediateOperand(int operand_index) const {
@@ -123,39 +132,40 @@ Register BytecodeArrayIterator::GetRegisterOperand(int operand_index) const {
       current_prefix_offset() +
       Bytecodes::GetOperandOffset(current_bytecode(), operand_index,
                                   current_operand_scale());
-  return Bytecodes::DecodeRegisterOperand(operand_start, operand_type,
-                                          current_operand_scale());
+  return BytecodeDecoder::DecodeRegisterOperand(operand_start, operand_type,
+                                                current_operand_scale());
 }
 
 int BytecodeArrayIterator::GetRegisterOperandRange(int operand_index) const {
-  interpreter::OperandType operand_type =
-      Bytecodes::GetOperandType(current_bytecode(), operand_index);
+  DCHECK_LE(operand_index, Bytecodes::NumberOfOperands(current_bytecode()));
+  const OperandType* operand_types =
+      Bytecodes::GetOperandTypes(current_bytecode());
+  OperandType operand_type = operand_types[operand_index];
   DCHECK(Bytecodes::IsRegisterOperandType(operand_type));
-  switch (operand_type) {
-    case OperandType::kRegPair:
-    case OperandType::kRegOutPair:
-      return 2;
-    case OperandType::kRegOutTriple:
-      return 3;
-    default: {
-      if (operand_index + 1 !=
-          Bytecodes::NumberOfOperands(current_bytecode())) {
-        OperandType next_operand_type =
-            Bytecodes::GetOperandType(current_bytecode(), operand_index + 1);
-        if (OperandType::kRegCount == next_operand_type) {
-          return GetRegisterCountOperand(operand_index + 1);
-        }
-      }
-      return 1;
-    }
+  if (operand_type == OperandType::kRegList) {
+    return GetRegisterCountOperand(operand_index + 1);
+  } else {
+    return Bytecodes::GetNumberOfRegistersRepresentedBy(operand_type);
   }
 }
 
-uint32_t BytecodeArrayIterator::GetRuntimeIdOperand(int operand_index) const {
+Runtime::FunctionId BytecodeArrayIterator::GetRuntimeIdOperand(
+    int operand_index) const {
   OperandType operand_type =
       Bytecodes::GetOperandType(current_bytecode(), operand_index);
   DCHECK(operand_type == OperandType::kRuntimeId);
-  return GetUnsignedOperand(operand_index, operand_type);
+  uint32_t raw_id = GetUnsignedOperand(operand_index, operand_type);
+  return static_cast<Runtime::FunctionId>(raw_id);
+}
+
+Runtime::FunctionId BytecodeArrayIterator::GetIntrinsicIdOperand(
+    int operand_index) const {
+  OperandType operand_type =
+      Bytecodes::GetOperandType(current_bytecode(), operand_index);
+  DCHECK(operand_type == OperandType::kIntrinsicId);
+  uint32_t raw_id = GetUnsignedOperand(operand_index, operand_type);
+  return IntrinsicsHelper::ToRuntimeId(
+      static_cast<IntrinsicsHelper::IntrinsicId>(raw_id));
 }
 
 Handle<Object> BytecodeArrayIterator::GetConstantForIndexOperand(

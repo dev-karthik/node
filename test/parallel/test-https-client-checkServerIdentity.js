@@ -1,40 +1,35 @@
 'use strict';
-var common = require('../common');
-var assert = require('assert');
+const common = require('../common');
+const assert = require('assert');
 
 if (!common.hasCrypto) {
   common.skip('missing crypto');
   return;
 }
-var https = require('https');
+const https = require('https');
 
-var fs = require('fs');
-var path = require('path');
+const fs = require('fs');
+const path = require('path');
 
-var options = {
+const options = {
   key: fs.readFileSync(path.join(common.fixturesDir, 'keys/agent3-key.pem')),
   cert: fs.readFileSync(path.join(common.fixturesDir, 'keys/agent3-cert.pem'))
 };
 
-var reqCount = 0;
-
-var server = https.createServer(options, function(req, res) {
-  ++reqCount;
+const server = https.createServer(options, common.mustCall(function(req, res) {
   res.writeHead(200);
   res.end();
   req.resume();
-}).listen(0, function() {
+})).listen(0, function() {
   authorized();
 });
 
 function authorized() {
-  var req = https.request({
+  const req = https.request({
     port: server.address().port,
     rejectUnauthorized: true,
     ca: [fs.readFileSync(path.join(common.fixturesDir, 'keys/ca2-cert.pem'))]
-  }, function(res) {
-    assert(false);
-  });
+  }, common.mustNotCall());
   req.on('error', function(err) {
     override();
   });
@@ -42,7 +37,7 @@ function authorized() {
 }
 
 function override() {
-  var options = {
+  const options = {
     port: server.address().port,
     rejectUnauthorized: true,
     ca: [fs.readFileSync(path.join(common.fixturesDir, 'keys/ca2-cert.pem'))],
@@ -51,7 +46,7 @@ function override() {
     }
   };
   options.agent = new https.Agent(options);
-  var req = https.request(options, function(res) {
+  const req = https.request(options, function(res) {
     assert(req.socket.authorized);
     server.close();
   });
@@ -60,7 +55,3 @@ function override() {
   });
   req.end();
 }
-
-process.on('exit', function() {
-  assert.equal(reqCount, 1);
-});

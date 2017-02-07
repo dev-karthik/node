@@ -2,13 +2,14 @@
 // just like test/gc/http-client.js,
 // but aborting every connection that comes in.
 
+require('../common');
+
 function serverHandler(req, res) {
   res.connection.destroy();
 }
 
 const http = require('http');
 const weak = require('weak');
-require('../common');
 const assert = require('assert');
 const todo = 500;
 let done = 0;
@@ -17,7 +18,7 @@ let countGC = 0;
 
 console.log('We should do ' + todo + ' requests');
 
-var server = http.createServer(serverHandler);
+const server = http.createServer(serverHandler);
 server.listen(0, getall);
 
 function getall() {
@@ -30,7 +31,7 @@ function getall() {
       statusLater();
     }
 
-    var req = http.get({
+    const req = http.get({
       hostname: 'localhost',
       pathname: '/',
       port: server.address().port
@@ -43,14 +44,14 @@ function getall() {
   setImmediate(getall);
 }
 
-for (var i = 0; i < 10; i++)
+for (let i = 0; i < 10; i++)
   getall();
 
 function afterGC() {
   countGC++;
 }
 
-var timer;
+let timer;
 function statusLater() {
   global.gc();
   if (timer) clearTimeout(timer);
@@ -63,7 +64,7 @@ function status() {
   console.log('Collected: %d/%d', countGC, count);
   if (done === todo) {
     console.log('All should be collected now.');
-    assert(count === countGC);
+    assert.strictEqual(count, countGC);
     process.exit(0);
   }
 }
