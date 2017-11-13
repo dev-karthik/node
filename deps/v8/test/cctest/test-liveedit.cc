@@ -30,10 +30,11 @@
 #include "src/v8.h"
 
 #include "src/debug/liveedit.h"
+#include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 
-
-using namespace v8::internal;
+namespace v8 {
+namespace internal {
 
 // Anonymous namespace.
 namespace {
@@ -96,7 +97,7 @@ void CompareStringsOneWay(const char* s1, const char* s2,
   StringCompareInput input(s1, s2);
 
   v8::internal::AccountingAllocator allocator;
-  Zone zone(&allocator);
+  Zone zone(&allocator, ZONE_NAME);
 
   DiffChunkStruct* first_chunk;
   ListDiffOutputWriter writer(&first_chunk, &zone);
@@ -175,3 +176,6 @@ TEST(LiveEditDiffer) {
   CompareStrings("abbabababababaaabbabababababbabbbbbbbababa",
                  "bbbbabababbbabababbbabababababbabbababa");
 }
+
+}  // namespace internal
+}  // namespace v8

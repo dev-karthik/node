@@ -13,6 +13,7 @@
 #include "src/compiler.h"
 #include "src/compiler/linkage.h"
 #include "src/macro-assembler.h"
+#include "src/objects-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/codegen-tester.h"
 #include "test/cctest/compiler/value-helper.h"
@@ -26,7 +27,7 @@ namespace {
 CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
                                   int param_count) {
   LocationSignature::Builder locations(zone, return_count, param_count);
-  const RegisterConfiguration* config = RegisterConfiguration::Turbofan();
+  const RegisterConfiguration* config = RegisterConfiguration::Default();
 
   // Add return location(s).
   CHECK(return_count <= config->num_allocatable_general_registers());
@@ -45,7 +46,7 @@ CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
   const RegList kCalleeSaveRegisters = 0;
   const RegList kCalleeSaveFPRegisters = 0;
 
-  // The target for WASM calls is always a code object.
+  // The target for wasm calls is always a code object.
   MachineType target_type = MachineType::AnyTagged();
   LinkageLocation target_loc = LinkageLocation::ForAnyRegister();
   return new (zone) CallDescriptor(       // --
@@ -65,7 +66,7 @@ CallDescriptor* GetCallDescriptor(Zone* zone, int return_count,
 
 TEST(ReturnThreeValues) {
   v8::internal::AccountingAllocator allocator;
-  Zone zone(&allocator);
+  Zone zone(&allocator, ZONE_NAME);
   CallDescriptor* desc = GetCallDescriptor(&zone, 3, 2);
   HandleAndZoneScope handles;
   RawMachineAssembler m(handles.main_isolate(),

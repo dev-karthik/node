@@ -12,6 +12,7 @@
 #include "src/compiler/node-properties.h"
 #include "src/compiler/simplified-operator.h"
 #include "src/handles-inl.h"
+#include "src/objects-inl.h"
 #include "src/objects.h"
 
 using testing::_;
@@ -356,10 +357,10 @@ class IsReturnMatcher final : public NodeMatcher {
 
   bool MatchAndExplain(Node* node, MatchResultListener* listener) const final {
     return (NodeMatcher::MatchAndExplain(node, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 0),
+            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 1),
                                  "value", value_matcher_, listener) &&
             (!has_second_return_value_ ||
-             PrintMatchAndExplain(NodeProperties::GetValueInput(node, 1),
+             PrintMatchAndExplain(NodeProperties::GetValueInput(node, 2),
                                   "value2", value2_matcher_, listener)) &&
             PrintMatchAndExplain(NodeProperties::GetEffectInput(node), "effect",
                                  effect_matcher_, listener) &&
@@ -803,32 +804,6 @@ class IsTailCallMatcher final : public NodeMatcher {
   const Matcher<Node*> control_matcher_;
 };
 
-
-class IsReferenceEqualMatcher final : public NodeMatcher {
- public:
-  IsReferenceEqualMatcher(const Matcher<Type*>& type_matcher,
-                          const Matcher<Node*>& lhs_matcher,
-                          const Matcher<Node*>& rhs_matcher)
-      : NodeMatcher(IrOpcode::kReferenceEqual),
-        type_matcher_(type_matcher),
-        lhs_matcher_(lhs_matcher),
-        rhs_matcher_(rhs_matcher) {}
-
-  bool MatchAndExplain(Node* node, MatchResultListener* listener) const final {
-    return (NodeMatcher::MatchAndExplain(node, listener) &&
-            // TODO(bmeurer): The type parameter is currently ignored.
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 0), "lhs",
-                                 lhs_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 1), "rhs",
-                                 rhs_matcher_, listener));
-  }
-
- private:
-  const Matcher<Type*> type_matcher_;
-  const Matcher<Node*> lhs_matcher_;
-  const Matcher<Node*> rhs_matcher_;
-};
-
 class IsSpeculativeBinopMatcher final : public NodeMatcher {
  public:
   IsSpeculativeBinopMatcher(IrOpcode::Value opcode,
@@ -990,132 +965,6 @@ class IsStoreFieldMatcher final : public NodeMatcher {
   const Matcher<Node*> effect_matcher_;
   const Matcher<Node*> control_matcher_;
 };
-
-
-class IsLoadBufferMatcher final : public NodeMatcher {
- public:
-  IsLoadBufferMatcher(const Matcher<BufferAccess>& access_matcher,
-                      const Matcher<Node*>& buffer_matcher,
-                      const Matcher<Node*>& offset_matcher,
-                      const Matcher<Node*>& length_matcher,
-                      const Matcher<Node*>& effect_matcher,
-                      const Matcher<Node*>& control_matcher)
-      : NodeMatcher(IrOpcode::kLoadBuffer),
-        access_matcher_(access_matcher),
-        buffer_matcher_(buffer_matcher),
-        offset_matcher_(offset_matcher),
-        length_matcher_(length_matcher),
-        effect_matcher_(effect_matcher),
-        control_matcher_(control_matcher) {}
-
-  void DescribeTo(std::ostream* os) const final {
-    NodeMatcher::DescribeTo(os);
-    *os << " whose access (";
-    access_matcher_.DescribeTo(os);
-    *os << "), buffer (";
-    buffer_matcher_.DescribeTo(os);
-    *os << "), offset (";
-    offset_matcher_.DescribeTo(os);
-    *os << "), length (";
-    length_matcher_.DescribeTo(os);
-    *os << "), effect (";
-    effect_matcher_.DescribeTo(os);
-    *os << ") and control (";
-    control_matcher_.DescribeTo(os);
-    *os << ")";
-  }
-
-  bool MatchAndExplain(Node* node, MatchResultListener* listener) const final {
-    return (NodeMatcher::MatchAndExplain(node, listener) &&
-            PrintMatchAndExplain(BufferAccessOf(node->op()), "access",
-                                 access_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 0),
-                                 "buffer", buffer_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 1),
-                                 "offset", offset_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 2),
-                                 "length", length_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetEffectInput(node), "effect",
-                                 effect_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetControlInput(node),
-                                 "control", control_matcher_, listener));
-  }
-
- private:
-  const Matcher<BufferAccess> access_matcher_;
-  const Matcher<Node*> buffer_matcher_;
-  const Matcher<Node*> offset_matcher_;
-  const Matcher<Node*> length_matcher_;
-  const Matcher<Node*> effect_matcher_;
-  const Matcher<Node*> control_matcher_;
-};
-
-
-class IsStoreBufferMatcher final : public NodeMatcher {
- public:
-  IsStoreBufferMatcher(const Matcher<BufferAccess>& access_matcher,
-                       const Matcher<Node*>& buffer_matcher,
-                       const Matcher<Node*>& offset_matcher,
-                       const Matcher<Node*>& length_matcher,
-                       const Matcher<Node*>& value_matcher,
-                       const Matcher<Node*>& effect_matcher,
-                       const Matcher<Node*>& control_matcher)
-      : NodeMatcher(IrOpcode::kStoreBuffer),
-        access_matcher_(access_matcher),
-        buffer_matcher_(buffer_matcher),
-        offset_matcher_(offset_matcher),
-        length_matcher_(length_matcher),
-        value_matcher_(value_matcher),
-        effect_matcher_(effect_matcher),
-        control_matcher_(control_matcher) {}
-
-  void DescribeTo(std::ostream* os) const final {
-    NodeMatcher::DescribeTo(os);
-    *os << " whose access (";
-    access_matcher_.DescribeTo(os);
-    *os << "), buffer (";
-    buffer_matcher_.DescribeTo(os);
-    *os << "), offset (";
-    offset_matcher_.DescribeTo(os);
-    *os << "), length (";
-    length_matcher_.DescribeTo(os);
-    *os << "), value (";
-    value_matcher_.DescribeTo(os);
-    *os << "), effect (";
-    effect_matcher_.DescribeTo(os);
-    *os << ") and control (";
-    control_matcher_.DescribeTo(os);
-    *os << ")";
-  }
-
-  bool MatchAndExplain(Node* node, MatchResultListener* listener) const final {
-    return (NodeMatcher::MatchAndExplain(node, listener) &&
-            PrintMatchAndExplain(BufferAccessOf(node->op()), "access",
-                                 access_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 0),
-                                 "buffer", buffer_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 1),
-                                 "offset", offset_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 2),
-                                 "length", length_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetValueInput(node, 3),
-                                 "value", value_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetEffectInput(node), "effect",
-                                 effect_matcher_, listener) &&
-            PrintMatchAndExplain(NodeProperties::GetControlInput(node),
-                                 "control", control_matcher_, listener));
-  }
-
- private:
-  const Matcher<BufferAccess> access_matcher_;
-  const Matcher<Node*> buffer_matcher_;
-  const Matcher<Node*> offset_matcher_;
-  const Matcher<Node*> length_matcher_;
-  const Matcher<Node*> value_matcher_;
-  const Matcher<Node*> effect_matcher_;
-  const Matcher<Node*> control_matcher_;
-};
-
 
 class IsLoadElementMatcher final : public NodeMatcher {
  public:
@@ -1364,7 +1213,8 @@ STORE_MATCHER(UnalignedStore)
 
 class IsStackSlotMatcher final : public NodeMatcher {
  public:
-  explicit IsStackSlotMatcher(const Matcher<MachineRepresentation>& rep_matcher)
+  explicit IsStackSlotMatcher(
+      const Matcher<StackSlotRepresentation>& rep_matcher)
       : NodeMatcher(IrOpcode::kStackSlot), rep_matcher_(rep_matcher) {}
 
   void DescribeTo(std::ostream* os) const final {
@@ -1376,12 +1226,12 @@ class IsStackSlotMatcher final : public NodeMatcher {
 
   bool MatchAndExplain(Node* node, MatchResultListener* listener) const final {
     return (NodeMatcher::MatchAndExplain(node, listener) &&
-            PrintMatchAndExplain(OpParameter<MachineRepresentation>(node),
+            PrintMatchAndExplain(OpParameter<StackSlotRepresentation>(node),
                                  "rep", rep_matcher_, listener));
   }
 
  private:
-  const Matcher<MachineRepresentation> rep_matcher_;
+  const Matcher<StackSlotRepresentation> rep_matcher_;
 };
 
 class IsToNumberMatcher final : public NodeMatcher {
@@ -1790,6 +1640,10 @@ Matcher<Node*> IsNumberConstant(const Matcher<double>& value_matcher) {
       new IsConstantMatcher<double>(IrOpcode::kNumberConstant, value_matcher));
 }
 
+Matcher<Node*> IsPointerConstant(const Matcher<intptr_t>& value_matcher) {
+  return MakeMatcher(new IsConstantMatcher<intptr_t>(IrOpcode::kPointerConstant,
+                                                     value_matcher));
+}
 
 Matcher<Node*> IsSelect(const Matcher<MachineRepresentation>& type_matcher,
                         const Matcher<Node*>& value0_matcher,
@@ -2068,13 +1922,6 @@ Matcher<Node*> IsTailCall(
                                            effect_matcher, control_matcher));
 }
 
-Matcher<Node*> IsReferenceEqual(const Matcher<Type*>& type_matcher,
-                                const Matcher<Node*>& lhs_matcher,
-                                const Matcher<Node*>& rhs_matcher) {
-  return MakeMatcher(
-      new IsReferenceEqualMatcher(type_matcher, lhs_matcher, rhs_matcher));
-}
-
 #define DEFINE_SPECULATIVE_BINOP_MATCHER(opcode)                              \
   Matcher<Node*> Is##opcode(const Matcher<NumberOperationHint>& hint_matcher, \
                             const Matcher<Node*>& lhs_matcher,                \
@@ -2114,32 +1961,6 @@ Matcher<Node*> IsStoreField(const Matcher<FieldAccess>& access_matcher,
                                              value_matcher, effect_matcher,
                                              control_matcher));
 }
-
-
-Matcher<Node*> IsLoadBuffer(const Matcher<BufferAccess>& access_matcher,
-                            const Matcher<Node*>& buffer_matcher,
-                            const Matcher<Node*>& offset_matcher,
-                            const Matcher<Node*>& length_matcher,
-                            const Matcher<Node*>& effect_matcher,
-                            const Matcher<Node*>& control_matcher) {
-  return MakeMatcher(new IsLoadBufferMatcher(access_matcher, buffer_matcher,
-                                             offset_matcher, length_matcher,
-                                             effect_matcher, control_matcher));
-}
-
-
-Matcher<Node*> IsStoreBuffer(const Matcher<BufferAccess>& access_matcher,
-                             const Matcher<Node*>& buffer_matcher,
-                             const Matcher<Node*>& offset_matcher,
-                             const Matcher<Node*>& length_matcher,
-                             const Matcher<Node*>& value_matcher,
-                             const Matcher<Node*>& effect_matcher,
-                             const Matcher<Node*>& control_matcher) {
-  return MakeMatcher(new IsStoreBufferMatcher(
-      access_matcher, buffer_matcher, offset_matcher, length_matcher,
-      value_matcher, effect_matcher, control_matcher));
-}
-
 
 Matcher<Node*> IsLoadElement(const Matcher<ElementAccess>& access_matcher,
                              const Matcher<Node*>& base_matcher,
@@ -2203,7 +2024,8 @@ Matcher<Node*> IsUnalignedStore(
       control_matcher));
 }
 
-Matcher<Node*> IsStackSlot(const Matcher<MachineRepresentation>& rep_matcher) {
+Matcher<Node*> IsStackSlot(
+    const Matcher<StackSlotRepresentation>& rep_matcher) {
   return MakeMatcher(new IsStackSlotMatcher(rep_matcher));
 }
 
@@ -2277,6 +2099,7 @@ IS_BINOP_MATCHER(NumberAtan2)
 IS_BINOP_MATCHER(NumberMax)
 IS_BINOP_MATCHER(NumberMin)
 IS_BINOP_MATCHER(NumberPow)
+IS_BINOP_MATCHER(ReferenceEqual)
 IS_BINOP_MATCHER(Word32And)
 IS_BINOP_MATCHER(Word32Or)
 IS_BINOP_MATCHER(Word32Xor)
@@ -2301,6 +2124,7 @@ IS_BINOP_MATCHER(Uint32LessThan)
 IS_BINOP_MATCHER(Uint32LessThanOrEqual)
 IS_BINOP_MATCHER(Int64Add)
 IS_BINOP_MATCHER(Int64Sub)
+IS_BINOP_MATCHER(Int64Mul)
 IS_BINOP_MATCHER(JSAdd)
 IS_BINOP_MATCHER(Float32Equal)
 IS_BINOP_MATCHER(Float32LessThan)
@@ -2374,8 +2198,10 @@ IS_UNOP_MATCHER(NumberToBoolean)
 IS_UNOP_MATCHER(NumberToInt32)
 IS_UNOP_MATCHER(NumberToUint32)
 IS_UNOP_MATCHER(PlainPrimitiveToNumber)
+IS_UNOP_MATCHER(ObjectIsNaN)
 IS_UNOP_MATCHER(ObjectIsReceiver)
 IS_UNOP_MATCHER(ObjectIsSmi)
+IS_UNOP_MATCHER(ObjectIsUndetectable)
 IS_UNOP_MATCHER(StringFromCharCode)
 IS_UNOP_MATCHER(Word32Clz)
 IS_UNOP_MATCHER(Word32Ctz)

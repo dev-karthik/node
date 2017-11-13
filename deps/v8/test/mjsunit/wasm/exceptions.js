@@ -2,10 +2,77 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --expose-wasm --wasm-eh-prototype
+// Flags: --expose-wasm --experimental-wasm-eh
 
 load("test/mjsunit/wasm/wasm-constants.js");
 load("test/mjsunit/wasm/wasm-module-builder.js");
+
+// The following method doesn't attempt to catch an raised exception.
+var test_throw = (function () {
+  var builder = new WasmModuleBuilder();
+
+  builder.addException(kSig_v_v);
+
+  builder.addFunction("throw_if_param_not_zero", kSig_i_i)
+      .addBody([
+        kExprGetLocal, 0,
+        kExprI32Const, 0,
+        kExprI32Ne,
+        kExprIf, kWasmStmt,
+        kExprThrow, 0,
+        kExprEnd,
+        kExprI32Const, 1
+      ]).exportFunc();
+
+  return builder.instantiate();
+})();
+
+// Check the test_throw exists.
+assertFalse(test_throw === undefined);
+assertFalse(test_throw === null);
+assertFalse(test_throw === 0);
+assertEquals("object", typeof test_throw.exports);
+assertEquals("function", typeof test_throw.exports.throw_if_param_not_zero);
+
+// Test expected behavior of throws
+assertEquals(1, test_throw.exports.throw_if_param_not_zero(0));
+assertWasmThrows([], function() { test_throw.exports.throw_if_param_not_zero(10) });
+assertWasmThrows([], function() { test_throw.exports.throw_if_param_not_zero(-1) });
+
+// Now that we know throwing works, we test catching the exceptions we raise.
+var test_catch = (function () {
+  var builder = new WasmModuleBuilder();
+
+  builder.addException(kSig_v_v);
+  builder.addFunction("simple_throw_catch_to_0_1", kSig_i_i)
+      .addBody([
+        kExprTry, kWasmI32,
+          kExprGetLocal, 0,
+          kExprI32Eqz,
+          kExprIf, kWasmStmt,
+            kExprThrow, 0,
+          kExprEnd,
+          kExprI32Const, 1,
+        kExprCatch, 0,
+          kExprI32Const, 0,
+        kExprEnd
+      ]).exportFunc();
+
+  return builder.instantiate();
+})();
+
+// Check the test_catch exists.
+assertFalse(test_catch === undefined);
+assertFalse(test_catch === null);
+assertFalse(test_catch === 0);
+assertEquals("object", typeof test_catch.exports);
+assertEquals("function", typeof test_catch.exports.simple_throw_catch_to_0_1);
+
+// Test expected behavior of simple catch.
+assertEquals(0, test_catch.exports.simple_throw_catch_to_0_1(0));
+assertEquals(1, test_catch.exports.simple_throw_catch_to_0_1(1));
+
+/* TODO(kschimpf) Convert these tests to work for the proposed exceptions.
 
 // The following methods do not attempt to catch the exception they raise.
 var test_throw = (function () {
@@ -16,7 +83,7 @@ var test_throw = (function () {
       kExprGetLocal, 0,
       kExprI32Const, 0,
       kExprI32Ne,
-      kExprIf, kAstStmt,
+      kExprIf, kWasmStmt,
       kExprGetLocal, 0,
       kExprThrow,
       kExprEnd,
@@ -79,34 +146,34 @@ var test_catch = (function () {
       throw value;
     }
     var sig_index = builder.addType(kSig_v_i);
-    var kJSThrowI = builder.addImport("throw_i", sig_index);
+    var kJSThrowI = builder.addImport("", "throw_i", sig_index);
 
     // Helper function that throws a string. Wasm should not catch it.
     function throw_string() {
       throw "use wasm;";
     }
     sig_index = builder.addType(kSig_v_v);
-    var kJSThrowString = builder.addImport("throw_string", sig_index);
+    var kJSThrowString = builder.addImport("", "throw_string", sig_index);
 
     // Helper function that throws undefined. Wasm should not catch it.
     function throw_undefined() {
       throw undefined;
     }
-    var kJSThrowUndefined = builder.addImport("throw_undefined", sig_index);
+    var kJSThrowUndefined = builder.addImport("", "throw_undefined", sig_index);
 
     // Helper function that throws an fp. Wasm should not catch it.
     function throw_fp() {
       throw 10.5;
     }
-    var kJSThrowFP = builder.addImport("throw_fp", sig_index);
+    var kJSThrowFP = builder.addImport("", "throw_fp", sig_index);
 
     // Helper function that throws a large number. Wasm should not catch it.
     function throw_large() {
       throw 1e+28;
     }
-    var kJSThrowLarge = builder.addImport("throw_large", sig_index);
+    var kJSThrowLarge = builder.addImport("", "throw_large", sig_index);
 
-    // Helper function for throwing from Wasm.
+    // Helper function for throwing from WebAssembly.
     var kWasmThrowFunction =
       builder.addFunction("throw", kSig_v_i)
         .addBody([
@@ -119,11 +186,11 @@ var test_catch = (function () {
     // happen in case of inlining, for example.
     builder.addFunction("same_scope", kSig_i_i)
       .addBody([
-        kExprTry, kAstI32,
+        kExprTry, kWasmI32,
           kExprGetLocal, 0,
           kExprI32Const, 0,
           kExprI32Ne,
-          kExprIf, kAstStmt,
+          kExprIf, kWasmStmt,
             kExprGetLocal, 0,
             kExprThrow,
             kExprUnreachable,
@@ -139,7 +206,7 @@ var test_catch = (function () {
 
     builder.addFunction("same_scope_ignore", kSig_i_i)
       .addBody([
-          kExprTry, kAstI32,
+          kExprTry, kWasmI32,
             kExprGetLocal, 0,
             kExprThrow,
             kExprUnreachable,
@@ -184,13 +251,13 @@ var test_catch = (function () {
       // p == 3 -> path == 338
       // else   -> path == 146
       .addBody([
-          kExprTry, kAstI32,
-            kExprTry, kAstI32,
-              kExprTry, kAstI32,
+          kExprTry, kWasmI32,
+            kExprTry, kWasmI32,
+              kExprTry, kWasmI32,
                 kExprGetLocal, 0,
                 kExprI32Const, 1,
                 kExprI32Eq,
-                kExprIf, kAstStmt,
+                kExprIf, kWasmStmt,
                   kExprI32Const, 1,
                   kExprThrow,
                   kExprUnreachable,
@@ -207,7 +274,7 @@ var test_catch = (function () {
               kExprGetLocal, 0,
               kExprI32Const, 2,
               kExprI32Eq,
-              kExprIf, kAstStmt,
+              kExprIf, kWasmStmt,
                 kExprGetLocal, 2,
                 kExprI32Const, 8,
                 kExprI32Ior,
@@ -227,18 +294,18 @@ var test_catch = (function () {
             kExprGetLocal, 0,
             kExprI32Const, 3,
             kExprI32Eq,
-            kExprIf, kAstStmt,
+            kExprIf, kWasmStmt,
               kExprGetLocal, 2,
-              kExprI32Const, /*64=*/ 192, 0,
+              kExprI32Const, / *64=* / 192, 0,
               kExprI32Ior,
               kExprThrow,
               kExprUnreachable,
             kExprEnd,
-            kExprI32Const, /*128=*/ 128, 1,
+            kExprI32Const, / *128=* / 128, 1,
             kExprI32Ior,
           kExprCatch, 1,
             kExprGetLocal, 1,
-            kExprI32Const, /*256=*/ 128, 2,
+            kExprI32Const, / *256=* / 128, 2,
             kExprI32Ior,
           kExprEnd,
       ])
@@ -249,10 +316,10 @@ var test_catch = (function () {
     var kFromDirectCallee =
       builder.addFunction("from_direct_callee", kSig_i_i)
         .addBody([
-          kExprTry, kAstI32,
+          kExprTry, kWasmI32,
             kExprGetLocal, 0,
             kExprCallFunction, kWasmThrowFunction,
-            kExprI32Const, /*-1=*/ 127,
+            kExprI32Const, / *-1=* / 127,
           kExprCatch, 1,
             kExprGetLocal, 1,
           kExprEnd
@@ -268,7 +335,7 @@ var test_catch = (function () {
         kExprGetLocal, 0,
         kExprI32Const, 0,
         kExprI32GtS,
-        kExprIf, kAstStmt,
+        kExprIf, kWasmStmt,
           kExprGetLocal, 0,
           kExprI32Const, 1,
           kExprI32Sub,
@@ -283,11 +350,11 @@ var test_catch = (function () {
 
     builder.addFunction("from_indirect_callee", kSig_i_i)
       .addBody([
-        kExprTry, kAstI32,
+        kExprTry, kWasmI32,
           kExprGetLocal, 0,
           kExprI32Const, 0,
           kExprCallFunction, kFromIndirectCalleeHelper,
-          kExprI32Const, /*-1=*/ 127,
+          kExprI32Const, / *-1=* / 127,
         kExprCatch, 1,
           kExprGetLocal, 1,
         kExprEnd
@@ -298,10 +365,10 @@ var test_catch = (function () {
     // Scenario 4: Catches an exception raised in JS.
     builder.addFunction("from_js", kSig_i_i)
       .addBody([
-        kExprTry, kAstI32,
+        kExprTry, kWasmI32,
           kExprGetLocal, 0,
           kExprCallFunction, kJSThrowI,
-          kExprI32Const, /*-1=*/ 127,
+          kExprI32Const, / *-1=* / 127,
         kExprCatch, 1,
           kExprGetLocal, 1,
         kExprEnd,
@@ -335,13 +402,13 @@ var test_catch = (function () {
       ])
       .exportFunc();
 
-  return builder.instantiate({
+  return builder.instantiate({"": {
       throw_i: throw_value,
       throw_string: throw_string,
       throw_fp: throw_fp,
       throw_large, throw_large,
       throw_undefined: throw_undefined
-  });
+  }});
 })();
 
 // Check the test_catch exists.
@@ -381,3 +448,4 @@ assertEquals(-10, test_catch.exports.from_js(-10));
 assertThrowsEquals(test_catch.exports.string_from_js, "use wasm;");
 assertThrowsEquals(test_catch.exports.large_from_js, 1e+28);
 assertThrowsEquals(test_catch.exports.undefined_from_js, undefined);
+*/

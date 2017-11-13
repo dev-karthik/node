@@ -65,7 +65,7 @@ SamplingHeapProfiler::SamplingHeapProfiler(
       stack_depth_(stack_depth),
       rate_(rate),
       flags_(flags) {
-  CHECK_GT(rate_, 0);
+  CHECK_GT(rate_, 0u);
   heap->new_space()->AddAllocationObserver(new_space_observer_.get());
   AllSpaces spaces(heap);
   for (Space* space = spaces.next(); space != nullptr; space = spaces.next()) {
@@ -173,8 +173,14 @@ SamplingHeapProfiler::AllocationNode* SamplingHeapProfiler::AddStack() {
       case GC:
         name = "(GC)";
         break;
+      case PARSER:
+        name = "(PARSER)";
+        break;
       case COMPILER:
         name = "(COMPILER)";
+        break;
+      case BYTECODE_COMPILER:
+        name = "(BYTECODE_COMPILER)";
         break;
       case OTHER:
         name = "(V8 API)";

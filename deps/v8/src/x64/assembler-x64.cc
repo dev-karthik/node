@@ -15,7 +15,10 @@
 #include <sys/sysctl.h>
 #endif
 
+#include "src/assembler-inl.h"
 #include "src/base/bits.h"
+#include "src/base/cpu.h"
+#include "src/code-stubs.h"
 #include "src/macro-assembler.h"
 #include "src/v8.h"
 
@@ -120,29 +123,24 @@ void CpuFeatures::PrintFeatures() {
 // -----------------------------------------------------------------------------
 // Implementation of RelocInfo
 
-Address RelocInfo::wasm_memory_reference() {
-  DCHECK(IsWasmMemoryReference(rmode_));
-  return Memory::Address_at(pc_);
-}
+Address RelocInfo::embedded_address() const { return Memory::Address_at(pc_); }
 
-Address RelocInfo::wasm_global_reference() {
-  DCHECK(IsWasmGlobalReference(rmode_));
-  return Memory::Address_at(pc_);
-}
+uint32_t RelocInfo::embedded_size() const { return Memory::uint32_at(pc_); }
 
-uint32_t RelocInfo::wasm_memory_size_reference() {
-  DCHECK(IsWasmMemorySizeReference(rmode_));
-  return Memory::uint32_at(pc_);
-}
-
-void RelocInfo::unchecked_update_wasm_memory_reference(
-    Address address, ICacheFlushMode flush_mode) {
+void RelocInfo::set_embedded_address(Isolate* isolate, Address address,
+                                     ICacheFlushMode icache_flush_mode) {
   Memory::Address_at(pc_) = address;
+  if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
+    Assembler::FlushICache(isolate, pc_, sizeof(Address));
+  }
 }
 
-void RelocInfo::unchecked_update_wasm_memory_size(uint32_t size,
-                                                  ICacheFlushMode flush_mode) {
+void RelocInfo::set_embedded_size(Isolate* isolate, uint32_t size,
+                                  ICacheFlushMode icache_flush_mode) {
   Memory::uint32_at(pc_) = size;
+  if (icache_flush_mode != SKIP_ICACHE_FLUSH) {
+    Assembler::FlushICache(isolate, pc_, sizeof(uint32_t));
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -279,12 +277,30 @@ bool Operand::AddressUsesRegister(Register reg) const {
   }
 }
 
+void Assembler::AllocateAndInstallRequestedHeapObjects(Isolate* isolate) {
+  for (auto& request : heap_object_requests_) {
+    Address pc = buffer_ + request.offset();
+    switch (request.kind()) {
+      case HeapObjectRequest::kHeapNumber: {
+        Handle<HeapNumber> object = isolate->factory()->NewHeapNumber(
+            request.heap_number(), IMMUTABLE, TENURED);
+        Memory::Object_Handle_at(pc) = object;
+        break;
+      }
+      case HeapObjectRequest::kCodeStub: {
+        request.code_stub()->set_isolate(isolate);
+        code_targets_[Memory::int32_at(pc)] = request.code_stub()->GetCode();
+        break;
+      }
+    }
+  }
+}
 
 // -----------------------------------------------------------------------------
 // Implementation of Assembler.
 
-Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
-    : AssemblerBase(isolate, buffer, buffer_size), code_targets_(100) {
+Assembler::Assembler(IsolateData isolate_data, void* buffer, int buffer_size)
+    : AssemblerBase(isolate_data, buffer, buffer_size), code_targets_(100) {
 // Clear the buffer in debug mode unless it was provided by the
 // caller in which case we can't be sure it's okay to overwrite
 // existing code in it.
@@ -297,11 +313,13 @@ Assembler::Assembler(Isolate* isolate, void* buffer, int buffer_size)
   reloc_info_writer.Reposition(buffer_ + buffer_size_, pc_);
 }
 
-
-void Assembler::GetCode(CodeDesc* desc) {
-  // Finalize code (at this point overflow() may be true, but the gap ensures
-  // that we are still not overlapping instructions and relocation info).
+void Assembler::GetCode(Isolate* isolate, CodeDesc* desc) {
+  // At this point overflow() may be true, but the gap ensures
+  // that we are still not overlapping instructions and relocation info.
   DCHECK(pc_ <= reloc_info_writer.pos());  // No overlap.
+
+  AllocateAndInstallRequestedHeapObjects(isolate);
+
   // Set up code descriptor.
   desc->buffer = buffer_;
   desc->buffer_size = buffer_size_;
@@ -313,11 +331,34 @@ void Assembler::GetCode(CodeDesc* desc) {
   desc->constant_pool_size = 0;
   desc->unwinding_info_size = 0;
   desc->unwinding_info = nullptr;
+
+  // Collection stage
+  auto jump_opt = jump_optimization_info();
+  if (jump_opt && jump_opt->is_collecting()) {
+    auto& bitmap = jump_opt->farjmp_bitmap();
+    int num = static_cast<int>(farjmp_positions_.size());
+    if (num && bitmap.empty()) {
+      bool can_opt = false;
+
+      bitmap.resize((num + 31) / 32, 0);
+      for (int i = 0; i < num; i++) {
+        int disp_pos = farjmp_positions_[i];
+        int disp = long_at(disp_pos);
+        if (is_int8(disp)) {
+          bitmap[i / 32] |= 1 << (i & 31);
+          can_opt = true;
+        }
+      }
+      if (can_opt) {
+        jump_opt->set_optimizable();
+      }
+    }
+  }
 }
 
 
 void Assembler::Align(int m) {
-  DCHECK(base::bits::IsPowerOfTwo32(m));
+  DCHECK(base::bits::IsPowerOfTwo(m));
   int delta = (m - (pc_offset() & (m - 1))) & (m - 1);
   Nop(delta);
 }
@@ -383,6 +424,21 @@ void Assembler::bind_to(Label* L, int pos) {
       L->UnuseNear();
     }
   }
+
+  // Optimization stage
+  auto jump_opt = jump_optimization_info();
+  if (jump_opt && jump_opt->is_optimizing()) {
+    auto it = label_farjmp_maps_.find(L);
+    if (it != label_farjmp_maps_.end()) {
+      auto& pos_vector = it->second;
+      for (auto fixup_pos : pos_vector) {
+        int disp = pos - (fixup_pos + sizeof(int8_t));
+        CHECK(is_int8(disp));
+        set_byte_at(fixup_pos, disp);
+      }
+      label_farjmp_maps_.erase(it);
+    }
+  }
   L->bind_to(pos);
 }
 
@@ -391,6 +447,21 @@ void Assembler::bind(Label* L) {
   bind_to(L, pc_offset());
 }
 
+void Assembler::record_farjmp_position(Label* L, int pos) {
+  auto& pos_vector = label_farjmp_maps_[L];
+  pos_vector.push_back(pos);
+}
+
+bool Assembler::is_optimizable_farjmp(int idx) {
+  if (predictable_code_size()) return false;
+
+  auto jump_opt = jump_optimization_info();
+  CHECK(jump_opt->is_optimizing());
+
+  auto& bitmap = jump_opt->farjmp_bitmap();
+  CHECK(idx < static_cast<int>(bitmap.size() * 32));
+  return !!(bitmap[idx / 32] & (1 << (idx & 31)));
+}
 
 void Assembler::GrowBuffer() {
   DCHECK(buffer_overflow());
@@ -402,8 +473,7 @@ void Assembler::GrowBuffer() {
 
   // Some internal data structures overflow for very large buffers,
   // they must ensure that kMaximalBufferSize is not too large.
-  if ((desc.buffer_size > kMaximalBufferSize) ||
-      (desc.buffer_size > isolate()->heap()->MaxOldGenerationSize())) {
+  if (desc.buffer_size > kMaximalBufferSize) {
     V8::FatalProcessOutOfMemory("Assembler::GrowBuffer");
   }
 
@@ -600,12 +670,9 @@ void Assembler::immediate_arithmetic_op(byte subcode,
                                         int size) {
   EnsureSpace ensure_space(this);
   emit_rex(dst, size);
-  if (is_int8(src.value_)) {
+  if (is_int8(src.value_) && RelocInfo::IsNone(src.rmode_)) {
     emit(0x83);
     emit_operand(subcode, dst);
-    if (!RelocInfo::IsNone(src.rmode_)) {
-      RecordRelocInfo(src.rmode_);
-    }
     emit(src.value_);
   } else {
     emit(0x81);
@@ -824,6 +891,23 @@ void Assembler::bsfq(Register dst, const Operand& src) {
   emit_operand(dst, src);
 }
 
+void Assembler::pshufw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
+  EnsureSpace ensure_space(this);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x70);
+  emit(0xC0 | (dst.low_bits() << 3) | src.low_bits());
+  emit(shuffle);
+}
+
+void Assembler::pshufw(XMMRegister dst, const Operand& src, uint8_t shuffle) {
+  EnsureSpace ensure_space(this);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x70);
+  emit_operand(dst.code(), src);
+  emit(shuffle);
+}
 
 void Assembler::call(Label* L) {
   EnsureSpace ensure_space(this);
@@ -853,14 +937,19 @@ void Assembler::call(Address entry, RelocInfo::Mode rmode) {
   emit_runtime_entry(entry, rmode);
 }
 
-
-void Assembler::call(Handle<Code> target,
-                     RelocInfo::Mode rmode,
-                     TypeFeedbackId ast_id) {
+void Assembler::call(CodeStub* stub) {
   EnsureSpace ensure_space(this);
   // 1110 1000 #32-bit disp.
   emit(0xE8);
-  emit_code_target(target, rmode, ast_id);
+  RequestHeapObject(HeapObjectRequest(stub));
+  emit_code_target(Handle<Code>(), RelocInfo::CODE_TARGET);
+}
+
+void Assembler::call(Handle<Code> target, RelocInfo::Mode rmode) {
+  EnsureSpace ensure_space(this);
+  // 1110 1000 #32-bit disp.
+  emit(0xE8);
+  emit_code_target(target, rmode);
 }
 
 
@@ -907,7 +996,6 @@ void Assembler::cld() {
   EnsureSpace ensure_space(this);
   emit(0xFC);
 }
-
 
 void Assembler::cdq() {
   EnsureSpace ensure_space(this);
@@ -1233,19 +1321,34 @@ void Assembler::j(Condition cc, Label* L, Label::Distance distance) {
     }
     L->link_to(pc_offset(), Label::kNear);
     emit(disp);
-  } else if (L->is_linked()) {
-    // 0000 1111 1000 tttn #32-bit disp.
-    emit(0x0F);
-    emit(0x80 | cc);
-    emitl(L->pos());
-    L->link_to(pc_offset() - sizeof(int32_t));
   } else {
-    DCHECK(L->is_unused());
-    emit(0x0F);
-    emit(0x80 | cc);
-    int32_t current = pc_offset();
-    emitl(current);
-    L->link_to(current);
+    auto jump_opt = jump_optimization_info();
+    if (V8_UNLIKELY(jump_opt)) {
+      if (jump_opt->is_optimizing() && is_optimizable_farjmp(farjmp_num_++)) {
+        // 0111 tttn #8-bit disp
+        emit(0x70 | cc);
+        record_farjmp_position(L, pc_offset());
+        emit(0);
+        return;
+      }
+      if (jump_opt->is_collecting()) {
+        farjmp_positions_.push_back(pc_offset() + 2);
+      }
+    }
+    if (L->is_linked()) {
+      // 0000 1111 1000 tttn #32-bit disp.
+      emit(0x0F);
+      emit(0x80 | cc);
+      emitl(L->pos());
+      L->link_to(pc_offset() - sizeof(int32_t));
+    } else {
+      DCHECK(L->is_unused());
+      emit(0x0F);
+      emit(0x80 | cc);
+      int32_t current = pc_offset();
+      emitl(current);
+      L->link_to(current);
+    }
   }
 }
 
@@ -1298,18 +1401,32 @@ void Assembler::jmp(Label* L, Label::Distance distance) {
     }
     L->link_to(pc_offset(), Label::kNear);
     emit(disp);
-  } else if (L->is_linked()) {
-    // 1110 1001 #32-bit disp.
-    emit(0xE9);
-    emitl(L->pos());
-    L->link_to(pc_offset() - long_size);
   } else {
-    // 1110 1001 #32-bit disp.
-    DCHECK(L->is_unused());
-    emit(0xE9);
-    int32_t current = pc_offset();
-    emitl(current);
-    L->link_to(current);
+    auto jump_opt = jump_optimization_info();
+    if (V8_UNLIKELY(jump_opt)) {
+      if (jump_opt->is_optimizing() && is_optimizable_farjmp(farjmp_num_++)) {
+        emit(0xEB);
+        record_farjmp_position(L, pc_offset());
+        emit(0);
+        return;
+      }
+      if (jump_opt->is_collecting()) {
+        farjmp_positions_.push_back(pc_offset() + 1);
+      }
+    }
+    if (L->is_linked()) {
+      // 1110 1001 #32-bit disp.
+      emit(0xE9);
+      emitl(L->pos());
+      L->link_to(pc_offset() - long_size);
+    } else {
+      // 1110 1001 #32-bit disp.
+      DCHECK(L->is_unused());
+      emit(0xE9);
+      int32_t current = pc_offset();
+      emitl(current);
+      L->link_to(current);
+    }
   }
 }
 
@@ -1319,15 +1436,6 @@ void Assembler::jmp(Handle<Code> target, RelocInfo::Mode rmode) {
   // 1110 1001 #32-bit disp.
   emit(0xE9);
   emit_code_target(target, rmode);
-}
-
-
-void Assembler::jmp(Address entry, RelocInfo::Mode rmode) {
-  DCHECK(RelocInfo::IsRuntimeEntry(rmode));
-  EnsureSpace ensure_space(this);
-  DCHECK(RelocInfo::IsRuntimeEntry(rmode));
-  emit(0xE9);
-  emit_runtime_entry(entry, rmode);
 }
 
 
@@ -1519,6 +1627,14 @@ void Assembler::movp(Register dst, void* value, RelocInfo::Mode rmode) {
   emit_rex(dst, kPointerSize);
   emit(0xB8 | dst.low_bits());
   emitp(value, rmode);
+}
+
+void Assembler::movp_heap_number(Register dst, double value) {
+  EnsureSpace ensure_space(this);
+  emit_rex(dst, kPointerSize);
+  emit(0xB8 | dst.low_bits());
+  RequestHeapObject(HeapObjectRequest(value));
+  emitp(nullptr, RelocInfo::EMBEDDED_OBJECT);
 }
 
 void Assembler::movq(Register dst, int64_t value, RelocInfo::Mode rmode) {
@@ -2044,158 +2160,142 @@ void Assembler::store_rax(ExternalReference ref) {
 
 void Assembler::testb(Register dst, Register src) {
   EnsureSpace ensure_space(this);
-  if (src.low_bits() == 4) {
-    emit_rex_32(src, dst);
-    emit(0x84);
-    emit_modrm(src, dst);
-  } else {
-    if (!dst.is_byte_register() || !src.is_byte_register()) {
-      // Register is not one of al, bl, cl, dl.  Its encoding needs REX.
-      emit_rex_32(dst, src);
-    }
-    emit(0x84);
-    emit_modrm(dst, src);
-  }
+  emit_test(dst, src, sizeof(int8_t));
 }
-
 
 void Assembler::testb(Register reg, Immediate mask) {
   DCHECK(is_int8(mask.value_) || is_uint8(mask.value_));
-  EnsureSpace ensure_space(this);
-  if (reg.is(rax)) {
-    emit(0xA8);
-    emit(mask.value_);  // Low byte emitted.
-  } else {
-    if (!reg.is_byte_register()) {
-      // Register is not one of al, bl, cl, dl.  Its encoding needs REX.
-      emit_rex_32(reg);
-    }
-    emit(0xF6);
-    emit_modrm(0x0, reg);
-    emit(mask.value_);  // Low byte emitted.
-  }
+  emit_test(reg, mask, sizeof(int8_t));
 }
-
 
 void Assembler::testb(const Operand& op, Immediate mask) {
   DCHECK(is_int8(mask.value_) || is_uint8(mask.value_));
-  EnsureSpace ensure_space(this);
-  emit_optional_rex_32(rax, op);
-  emit(0xF6);
-  emit_operand(rax, op);  // Operation code 0
-  emit(mask.value_);  // Low byte emitted.
+  emit_test(op, mask, sizeof(int8_t));
 }
 
 
 void Assembler::testb(const Operand& op, Register reg) {
-  EnsureSpace ensure_space(this);
-  if (!reg.is_byte_register()) {
-    // Register is not one of al, bl, cl, dl.  Its encoding needs REX.
-    emit_rex_32(reg, op);
-  } else {
-    emit_optional_rex_32(reg, op);
-  }
-  emit(0x84);
-  emit_operand(reg, op);
+  emit_test(op, reg, sizeof(int8_t));
 }
 
 void Assembler::testw(Register dst, Register src) {
-  EnsureSpace ensure_space(this);
-  emit(0x66);
-  if (src.low_bits() == 4) {
-    emit_rex_32(src, dst);
-  }
-  emit(0x85);
-  emit_modrm(src, dst);
+  emit_test(dst, src, sizeof(uint16_t));
 }
 
 void Assembler::testw(Register reg, Immediate mask) {
-  DCHECK(is_int16(mask.value_) || is_uint16(mask.value_));
-  EnsureSpace ensure_space(this);
-  emit(0x66);
-  if (reg.is(rax)) {
-    emit(0xA9);
-    emitw(mask.value_);
-  } else {
-    if (reg.low_bits() == 4) {
-      emit_rex_32(reg);
-    }
-    emit(0xF7);
-    emit_modrm(0x0, reg);
-    emitw(mask.value_);
-  }
+  emit_test(reg, mask, sizeof(int16_t));
 }
 
 void Assembler::testw(const Operand& op, Immediate mask) {
-  DCHECK(is_int16(mask.value_) || is_uint16(mask.value_));
-  EnsureSpace ensure_space(this);
-  emit(0x66);
-  emit_optional_rex_32(rax, op);
-  emit(0xF7);
-  emit_operand(rax, op);
-  emitw(mask.value_);
+  emit_test(op, mask, sizeof(int16_t));
 }
 
 void Assembler::testw(const Operand& op, Register reg) {
-  EnsureSpace ensure_space(this);
-  emit(0x66);
-  emit_optional_rex_32(reg, op);
-  emit(0x85);
-  emit_operand(rax, op);
+  emit_test(op, reg, sizeof(int16_t));
 }
 
 void Assembler::emit_test(Register dst, Register src, int size) {
   EnsureSpace ensure_space(this);
-  if (src.low_bits() == 4) {
-    emit_rex(src, dst, size);
-    emit(0x85);
-    emit_modrm(src, dst);
+  if (src.low_bits() == 4) std::swap(dst, src);
+  if (size == sizeof(int16_t)) {
+    emit(0x66);
+    size = sizeof(int32_t);
+  }
+  bool byte_operand = size == sizeof(int8_t);
+  if (byte_operand) {
+    size = sizeof(int32_t);
+    if (!src.is_byte_register() || !dst.is_byte_register()) {
+      emit_rex_32(dst, src);
+    }
   } else {
     emit_rex(dst, src, size);
-    emit(0x85);
-    emit_modrm(dst, src);
   }
+  emit(byte_operand ? 0x84 : 0x85);
+  emit_modrm(dst, src);
 }
 
 
 void Assembler::emit_test(Register reg, Immediate mask, int size) {
-  // testl with a mask that fits in the low byte is exactly testb.
   if (is_uint8(mask.value_)) {
-    testb(reg, mask);
-    return;
+    size = sizeof(int8_t);
+  } else if (is_uint16(mask.value_)) {
+    size = sizeof(int16_t);
   }
   EnsureSpace ensure_space(this);
-  if (reg.is(rax)) {
-    emit_rex(rax, size);
-    emit(0xA9);
-    emit(mask);
+  bool half_word = size == sizeof(int16_t);
+  if (half_word) {
+    emit(0x66);
+    size = sizeof(int32_t);
+  }
+  bool byte_operand = size == sizeof(int8_t);
+  if (byte_operand) {
+    size = sizeof(int32_t);
+    if (!reg.is_byte_register()) emit_rex_32(reg);
   } else {
     emit_rex(reg, size);
-    emit(0xF7);
+  }
+  if (reg.is(rax)) {
+    emit(byte_operand ? 0xA8 : 0xA9);
+  } else {
+    emit(byte_operand ? 0xF6 : 0xF7);
     emit_modrm(0x0, reg);
+  }
+  if (byte_operand) {
+    emit(mask.value_);
+  } else if (half_word) {
+    emitw(mask.value_);
+  } else {
     emit(mask);
   }
 }
 
-
 void Assembler::emit_test(const Operand& op, Immediate mask, int size) {
-  // testl with a mask that fits in the low byte is exactly testb.
   if (is_uint8(mask.value_)) {
-    testb(op, mask);
-    return;
+    size = sizeof(int8_t);
+  } else if (is_uint16(mask.value_)) {
+    size = sizeof(int16_t);
   }
   EnsureSpace ensure_space(this);
+  bool half_word = size == sizeof(int16_t);
+  if (half_word) {
+    emit(0x66);
+    size = sizeof(int32_t);
+  }
+  bool byte_operand = size == sizeof(int8_t);
+  if (byte_operand) {
+    size = sizeof(int32_t);
+  }
   emit_rex(rax, op, size);
-  emit(0xF7);
+  emit(byte_operand ? 0xF6 : 0xF7);
   emit_operand(rax, op);  // Operation code 0
-  emit(mask);
+  if (byte_operand) {
+    emit(mask.value_);
+  } else if (half_word) {
+    emitw(mask.value_);
+  } else {
+    emit(mask);
+  }
 }
-
 
 void Assembler::emit_test(const Operand& op, Register reg, int size) {
   EnsureSpace ensure_space(this);
-  emit_rex(reg, op, size);
-  emit(0x85);
+  if (size == sizeof(int16_t)) {
+    emit(0x66);
+    size = sizeof(int32_t);
+  }
+  bool byte_operand = size == sizeof(int8_t);
+  if (byte_operand) {
+    size = sizeof(int32_t);
+    if (!reg.is_byte_register()) {
+      // Register is not one of al, bl, cl, dl.  Its encoding needs REX.
+      emit_rex_32(reg, op);
+    } else {
+      emit_optional_rex_32(reg, op);
+    }
+  } else {
+    emit_rex(reg, op, size);
+  }
+  emit(byte_operand ? 0x84 : 0x85);
   emit_operand(reg, op);
 }
 
@@ -2886,12 +2986,14 @@ void Assembler::pinsrw(XMMRegister dst, const Operand& src, int8_t imm8) {
 }
 
 void Assembler::pextrw(Register dst, XMMRegister src, int8_t imm8) {
+  DCHECK(IsEnabled(SSE4_1));
   DCHECK(is_uint8(imm8));
   EnsureSpace ensure_space(this);
   emit(0x66);
   emit_optional_rex_32(src, dst);
   emit(0x0F);
-  emit(0xC5);
+  emit(0x3A);
+  emit(0x15);
   emit_sse_operand(src, dst);
   emit(imm8);
 }
@@ -3049,7 +3151,7 @@ void Assembler::movaps(XMMRegister dst, XMMRegister src) {
 void Assembler::shufps(XMMRegister dst, XMMRegister src, byte imm8) {
   DCHECK(is_uint8(imm8));
   EnsureSpace ensure_space(this);
-  emit_optional_rex_32(src, dst);
+  emit_optional_rex_32(dst, src);
   emit(0x0F);
   emit(0xC6);
   emit_sse_operand(dst, src);
@@ -4632,6 +4734,26 @@ void Assembler::psrldq(XMMRegister dst, uint8_t shift) {
   emit(shift);
 }
 
+void Assembler::pshufhw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
+  EnsureSpace ensure_space(this);
+  emit(0xF3);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x70);
+  emit_sse_operand(dst, src);
+  emit(shuffle);
+}
+
+void Assembler::pshuflw(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
+  EnsureSpace ensure_space(this);
+  emit(0xF2);
+  emit_optional_rex_32(dst, src);
+  emit(0x0F);
+  emit(0x70);
+  emit_sse_operand(dst, src);
+  emit(shuffle);
+}
+
 void Assembler::pshufd(XMMRegister dst, XMMRegister src, uint8_t shuffle) {
   EnsureSpace ensure_space(this);
   emit(0x66);
@@ -4682,6 +4804,13 @@ void Assembler::emit_sse_operand(XMMRegister dst) {
   emit(0xD8 | dst.low_bits());
 }
 
+void Assembler::RecordProtectedInstructionLanding(int pc_offset) {
+  EnsureSpace ensure_space(this);
+  RelocInfo rinfo(pc(), RelocInfo::WASM_PROTECTED_INSTRUCTION_LANDING,
+                  pc_offset, nullptr);
+  reloc_info_writer.Write(&rinfo);
+}
+
 
 void Assembler::db(uint8_t data) {
   EnsureSpace ensure_space(this);
@@ -4730,20 +4859,14 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
   if (rmode == RelocInfo::EXTERNAL_REFERENCE &&
       !serializer_enabled() && !emit_debug_code()) {
     return;
-  } else if (rmode == RelocInfo::CODE_AGE_SEQUENCE) {
-    // Don't record psuedo relocation info for code age sequence mode.
-    return;
   }
-  RelocInfo rinfo(isolate(), pc_, rmode, data, NULL);
+  RelocInfo rinfo(pc_, rmode, data, NULL);
   reloc_info_writer.Write(&rinfo);
 }
 
-
 const int RelocInfo::kApplyMask = RelocInfo::kCodeTargetMask |
-    1 << RelocInfo::RUNTIME_ENTRY |
-    1 << RelocInfo::INTERNAL_REFERENCE |
-    1 << RelocInfo::CODE_AGE_SEQUENCE;
-
+                                  1 << RelocInfo::RUNTIME_ENTRY |
+                                  1 << RelocInfo::INTERNAL_REFERENCE;
 
 bool RelocInfo::IsCodedSpecially() {
   // The deserializer needs to know whether a pointer is specially coded.  Being

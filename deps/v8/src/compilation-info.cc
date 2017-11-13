@@ -7,69 +7,72 @@
 #include "src/api.h"
 #include "src/ast/ast.h"
 #include "src/ast/scopes.h"
+#include "src/debug/debug.h"
 #include "src/isolate.h"
+#include "src/objects-inl.h"
 #include "src/parsing/parse-info.h"
+#include "src/source-position.h"
 
 namespace v8 {
 namespace internal {
 
-#define PARSE_INFO_GETTER(type, name)  \
-  type CompilationInfo::name() const { \
-    CHECK(parse_info());               \
-    return parse_info()->name();       \
-  }
+CompilationInfo::CompilationInfo(Zone* zone, Isolate* isolate,
+                                 ParseInfo* parse_info,
+                                 FunctionLiteral* literal)
+    : CompilationInfo(parse_info->script(), {},
+                      Code::ComputeFlags(Code::FUNCTION), BASE, isolate, zone) {
+  // NOTE: The parse_info passed here represents the global information gathered
+  // during parsing, but does not represent specific details of the actual
+  // function literal being compiled for this CompilationInfo. As such,
+  // parse_info->literal() might be different from literal, and only global
+  // details of the script being parsed are relevant to this CompilationInfo.
+  DCHECK_NOT_NULL(literal);
+  literal_ = literal;
+  source_range_map_ = parse_info->source_range_map();
 
-#define PARSE_INFO_GETTER_WITH_DEFAULT(type, name, def) \
-  type CompilationInfo::name() const {                  \
-    return parse_info() ? parse_info()->name() : def;   \
-  }
-
-PARSE_INFO_GETTER(Handle<Script>, script)
-PARSE_INFO_GETTER(FunctionLiteral*, literal)
-PARSE_INFO_GETTER_WITH_DEFAULT(DeclarationScope*, scope, nullptr)
-PARSE_INFO_GETTER(Handle<SharedFunctionInfo>, shared_info)
-
-#undef PARSE_INFO_GETTER
-#undef PARSE_INFO_GETTER_WITH_DEFAULT
-
-bool CompilationInfo::has_shared_info() const {
-  return parse_info_ && !parse_info_->shared_info().is_null();
+  if (parse_info->is_eval()) MarkAsEval();
+  if (parse_info->is_native()) MarkAsNative();
+  if (parse_info->will_serialize()) MarkAsSerializing();
 }
 
-CompilationInfo::CompilationInfo(ParseInfo* parse_info,
+CompilationInfo::CompilationInfo(Zone* zone, Isolate* isolate,
+                                 Handle<Script> script,
+                                 Handle<SharedFunctionInfo> shared,
                                  Handle<JSFunction> closure)
-    : CompilationInfo(parse_info, {}, Code::ComputeFlags(Code::FUNCTION), BASE,
-                      parse_info->isolate(), parse_info->zone()) {
+    : CompilationInfo(script, {}, Code::ComputeFlags(Code::OPTIMIZED_FUNCTION),
+                      OPTIMIZE, isolate, zone) {
+  shared_info_ = shared;
   closure_ = closure;
-
-  // Compiling for the snapshot typically results in different code than
-  // compiling later on. This means that code recompiled with deoptimization
-  // support won't be "equivalent" (as defined by SharedFunctionInfo::
-  // EnableDeoptimizationSupport), so it will replace the old code and all
-  // its type feedback. To avoid this, always compile functions in the snapshot
-  // with deoptimization support.
-  if (isolate_->serializer_enabled()) EnableDeoptimizationSupport();
+  optimization_id_ = isolate->NextOptimizationId();
 
   if (FLAG_function_context_specialization) MarkAsFunctionContextSpecializing();
-  if (FLAG_turbo_source_positions) MarkAsSourcePositionsEnabled();
   if (FLAG_turbo_splitting) MarkAsSplittingEnabled();
+
+  // Collect source positions for optimized code when profiling or if debugger
+  // is active, to be able to get more precise source positions at the price of
+  // more memory consumption.
+  if (isolate_->NeedsSourcePositionsForProfiling()) {
+    MarkAsSourcePositionsEnabled();
+  }
 }
 
 CompilationInfo::CompilationInfo(Vector<const char> debug_name,
                                  Isolate* isolate, Zone* zone,
                                  Code::Flags code_flags)
-    : CompilationInfo(nullptr, debug_name, code_flags, STUB, isolate, zone) {}
+    : CompilationInfo(Handle<Script>::null(), debug_name, code_flags, STUB,
+                      isolate, zone) {}
 
-CompilationInfo::CompilationInfo(ParseInfo* parse_info,
+CompilationInfo::CompilationInfo(Handle<Script> script,
                                  Vector<const char> debug_name,
                                  Code::Flags code_flags, Mode mode,
                                  Isolate* isolate, Zone* zone)
-    : parse_info_(parse_info),
-      isolate_(isolate),
+    : isolate_(isolate),
+      script_(script),
+      literal_(nullptr),
       flags_(0),
       code_flags_(code_flags),
       mode_(mode),
-      osr_ast_id_(BailoutId::None()),
+      osr_offset_(BailoutId::None()),
       zone_(zone),
       deferred_handles_(nullptr),
       dependencies_(isolate, zone),
@@ -85,7 +88,11 @@ CompilationInfo::~CompilationInfo() {
     shared_info()->DisableOptimization(bailout_reason());
   }
   dependencies()->Rollback();
-  delete deferred_handles_;
+}
+
+DeclarationScope* CompilationInfo::scope() const {
+  DCHECK_NOT_NULL(literal_);
+  return literal_->scope();
 }
 
 int CompilationInfo::num_parameters() const {
@@ -101,16 +108,30 @@ bool CompilationInfo::is_this_defined() const { return !IsStub(); }
 // Primitive functions are unlikely to be picked up by the stack-walking
 // profiler, so they trigger their own optimization when they're called
 // for the SharedFunctionInfo::kCallsUntilPrimitiveOptimization-th time.
-bool CompilationInfo::ShouldSelfOptimize() {
-  return FLAG_crankshaft &&
-         !(literal()->flags() & AstProperties::kDontSelfOptimize) &&
-         !literal()->dont_optimize() &&
-         literal()->scope()->AllowsLazyCompilation() &&
-         !shared_info()->optimization_disabled();
+// TODO(6409) Remove when Full-Codegen dies.
+bool CompilationInfo::ShouldSelfOptimize() { return false; }
+
+void CompilationInfo::set_deferred_handles(
+    std::shared_ptr<DeferredHandles> deferred_handles) {
+  DCHECK(deferred_handles_.get() == nullptr);
+  deferred_handles_.swap(deferred_handles);
+}
+
+void CompilationInfo::set_deferred_handles(DeferredHandles* deferred_handles) {
+  DCHECK(deferred_handles_.get() == nullptr);
+  deferred_handles_.reset(deferred_handles);
 }
 
 void CompilationInfo::ReopenHandlesInNewHandleScope() {
-  closure_ = Handle<JSFunction>(*closure_);
+  if (!script_.is_null()) {
+    script_ = Handle<Script>(*script_);
+  }
+  if (!shared_info_.is_null()) {
+    shared_info_ = Handle<SharedFunctionInfo>(*shared_info_);
+  }
+  if (!closure_.is_null()) {
+    closure_ = Handle<JSFunction>(*closure_);
+  }
 }
 
 bool CompilationInfo::has_simple_parameters() {
@@ -118,12 +139,12 @@ bool CompilationInfo::has_simple_parameters() {
 }
 
 std::unique_ptr<char[]> CompilationInfo::GetDebugName() const {
-  if (parse_info() && parse_info()->literal()) {
+  if (literal()) {
     AllowHandleDereference allow_deref;
-    return parse_info()->literal()->debug_name()->ToCString();
+    return literal()->debug_name()->ToCString();
   }
-  if (parse_info() && !parse_info()->shared_info().is_null()) {
-    return parse_info()->shared_info()->DebugName()->ToCString();
+  if (!shared_info().is_null()) {
+    return shared_info()->DebugName()->ToCString();
   }
   Vector<const char> name_vec = debug_name_;
   if (name_vec.is_empty()) name_vec = ArrayVector("unknown");
@@ -144,11 +165,13 @@ StackFrame::Type CompilationInfo::GetOutputStackFrameType() const {
 #undef CASE_KIND
       return StackFrame::STUB;
     case Code::WASM_FUNCTION:
-      return StackFrame::WASM;
+      return StackFrame::WASM_COMPILED;
     case Code::JS_TO_WASM_FUNCTION:
       return StackFrame::JS_TO_WASM;
     case Code::WASM_TO_JS_FUNCTION:
       return StackFrame::WASM_TO_JS;
+    case Code::WASM_INTERPRETER_ENTRY:
+      return StackFrame::WASM_INTERPRETER_ENTRY;
     default:
       UNIMPLEMENTED();
       return StackFrame::NONE;
@@ -156,21 +179,14 @@ StackFrame::Type CompilationInfo::GetOutputStackFrameType() const {
 }
 
 int CompilationInfo::GetDeclareGlobalsFlags() const {
-  DCHECK(DeclareGlobalsLanguageMode::is_valid(parse_info()->language_mode()));
-  return DeclareGlobalsEvalFlag::encode(parse_info()->is_eval()) |
-         DeclareGlobalsNativeFlag::encode(parse_info()->is_native()) |
-         DeclareGlobalsLanguageMode::encode(parse_info()->language_mode());
+  return DeclareGlobalsEvalFlag::encode(is_eval()) |
+         DeclareGlobalsNativeFlag::encode(is_native());
 }
 
 SourcePositionTableBuilder::RecordingMode
 CompilationInfo::SourcePositionRecordingMode() const {
-  return parse_info() && parse_info()->is_native()
-             ? SourcePositionTableBuilder::OMIT_SOURCE_POSITIONS
-             : SourcePositionTableBuilder::RECORD_SOURCE_POSITIONS;
-}
-
-bool CompilationInfo::ExpectsJSReceiverAsReceiver() {
-  return is_sloppy(parse_info()->language_mode()) && !parse_info()->is_native();
+  return is_native() ? SourcePositionTableBuilder::OMIT_SOURCE_POSITIONS
+                     : SourcePositionTableBuilder::RECORD_SOURCE_POSITIONS;
 }
 
 bool CompilationInfo::has_context() const { return !closure().is_null(); }
@@ -193,17 +209,11 @@ JSGlobalObject* CompilationInfo::global_object() const {
   return has_global_object() ? native_context()->global_object() : nullptr;
 }
 
-void CompilationInfo::SetOptimizing() {
-  DCHECK(has_shared_info());
-  SetMode(OPTIMIZE);
-  optimization_id_ = isolate()->NextOptimizationId();
-  code_flags_ = Code::KindField::update(code_flags_, Code::OPTIMIZED_FUNCTION);
-}
-
-void CompilationInfo::AddInlinedFunction(
-    Handle<SharedFunctionInfo> inlined_function) {
-  inlined_functions_.push_back(InlinedFunctionHolder(
-      inlined_function, handle(inlined_function->code())));
+int CompilationInfo::AddInlinedFunction(
+    Handle<SharedFunctionInfo> inlined_function, SourcePosition pos) {
+  int id = static_cast<int>(inlined_functions_.size());
+  inlined_functions_.push_back(InlinedFunctionHolder(inlined_function, pos));
+  return id;
 }
 
 Code::Kind CompilationInfo::output_code_kind() const {

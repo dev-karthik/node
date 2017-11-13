@@ -1,37 +1,43 @@
 // Flags: --expose_internals
 'use strict';
-const common = require('../common');
+require('../common');
+const fixtures = require('../common/fixtures');
 const assert = require('assert');
 const internalUtil = require('internal/util');
 const binding = process.binding('util');
 const spawnSync = require('child_process').spawnSync;
-const path = require('path');
 
 const kArrowMessagePrivateSymbolIndex = binding['arrow_message_private_symbol'];
 const kDecoratedPrivateSymbolIndex = binding['decorated_private_symbol'];
 
+const decorateErrorStack = internalUtil.decorateErrorStack;
+
 assert.doesNotThrow(function() {
-  internalUtil.decorateErrorStack();
-  internalUtil.decorateErrorStack(null);
-  internalUtil.decorateErrorStack(1);
-  internalUtil.decorateErrorStack(true);
+  decorateErrorStack();
+  decorateErrorStack(null);
+  decorateErrorStack(1);
+  decorateErrorStack(true);
 });
 
 // Verify that a stack property is not added to non-Errors
 const obj = {};
-internalUtil.decorateErrorStack(obj);
+decorateErrorStack(obj);
 assert.strictEqual(obj.stack, undefined);
 
-// Verify that the stack is decorated when possible
+// Verify that the stack is decorated when possible.
 function checkStack(stack) {
-  const matches = stack.match(/var foo bar;/g);
-  assert.strictEqual(Array.isArray(matches), true);
-  assert.strictEqual(matches.length, 1);
+  // Matching only on a minimal piece of the stack because the string will vary
+  // greatly depending on the JavaScript engine. V8 includes `;` because it
+  // displays the line of code (`var foo bar;`) that is causing a problem.
+  // ChakraCore does not display the line of code but includes `;` in the phrase
+  // `Expected ';' `.
+  assert.ok(/;/g.test(stack));
+  // Test that it's a multiline string.
+  assert.ok(/\n/g.test(stack));
 }
 let err;
 const badSyntaxPath =
-    path.join(common.fixturesDir, 'syntax', 'bad_syntax')
-        .replace(/\\/g, '\\\\');
+  fixtures.path('syntax', 'bad_syntax').replace(/\\/g, '\\\\');
 
 try {
   require(badSyntaxPath);
@@ -43,8 +49,8 @@ assert(typeof err, 'object');
 checkStack(err.stack);
 
 // Verify that the stack is only decorated once
-internalUtil.decorateErrorStack(err);
-internalUtil.decorateErrorStack(err);
+decorateErrorStack(err);
+decorateErrorStack(err);
 checkStack(err.stack);
 
 // Verify that the stack is only decorated once for uncaught exceptions
@@ -58,7 +64,7 @@ checkStack(result.stderr);
 // Verify that the stack is unchanged when there is no arrow message
 err = new Error('foo');
 let originalStack = err.stack;
-internalUtil.decorateErrorStack(err);
+decorateErrorStack(err);
 assert.strictEqual(originalStack, err.stack);
 
 // Verify that the arrow message is added to the start of the stack when it
@@ -67,9 +73,9 @@ const arrowMessage = 'arrow_message';
 err = new Error('foo');
 originalStack = err.stack;
 
-internalUtil.setHiddenValue(err, kArrowMessagePrivateSymbolIndex, arrowMessage);
-internalUtil.decorateErrorStack(err);
+binding.setHiddenValue(err, kArrowMessagePrivateSymbolIndex, arrowMessage);
+decorateErrorStack(err);
 
 assert.strictEqual(err.stack, `${arrowMessage}${originalStack}`);
-assert.strictEqual(internalUtil
-  .getHiddenValue(err, kDecoratedPrivateSymbolIndex), true);
+assert.strictEqual(
+  binding.getHiddenValue(err, kDecoratedPrivateSymbolIndex), true);

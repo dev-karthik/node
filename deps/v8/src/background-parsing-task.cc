@@ -4,8 +4,10 @@
 
 #include "src/background-parsing-task.h"
 
-#include "src/debug/debug.h"
+#include "src/objects-inl.h"
 #include "src/parsing/parser.h"
+#include "src/parsing/scanner-character-streams.h"
+#include "src/vm-state-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -13,7 +15,6 @@ namespace internal {
 void StreamedSource::Release() {
   parser.reset();
   info.reset();
-  zone.reset();
 }
 
 BackgroundParsingTask::BackgroundParsingTask(
@@ -27,33 +28,36 @@ BackgroundParsingTask::BackgroundParsingTask(
          options == ScriptCompiler::kProduceCodeCache ||
          options == ScriptCompiler::kNoCompileOptions);
 
+  VMState<PARSER> state(isolate);
+
   // Prepare the data for the internalization phase and compilation phase, which
   // will happen in the main thread after parsing.
-  Zone* zone = new Zone(isolate->allocator());
-  ParseInfo* info = new ParseInfo(zone);
-  source->zone.reset(zone);
-  source->info.reset(info);
-  info->set_isolate(isolate);
-  info->set_source_stream(source->source_stream.get());
-  info->set_source_stream_encoding(source->encoding);
-  info->set_hash_seed(isolate->heap()->HashSeed());
-  info->set_global();
+  ParseInfo* info = new ParseInfo(isolate->allocator());
+  info->InitFromIsolate(isolate);
+  if (V8_UNLIKELY(FLAG_runtime_stats)) {
+    info->set_runtime_call_stats(new (info->zone()) RuntimeCallStats());
+  }
+  info->set_toplevel();
+  std::unique_ptr<Utf16CharacterStream> stream(
+      ScannerStream::For(source->source_stream.get(), source->encoding,
+                         info->runtime_call_stats()));
+  info->set_character_stream(std::move(stream));
   info->set_unicode_cache(&source_->unicode_cache);
   info->set_compile_options(options);
-  // Parse eagerly with ignition since we will compile eagerly.
-  info->set_allow_lazy_parsing(!(i::FLAG_ignition && i::FLAG_ignition_eager));
-
-  if (options == ScriptCompiler::kProduceParserCache ||
-      options == ScriptCompiler::kProduceCodeCache) {
-    source_->info->set_cached_data(&script_data_);
+  info->set_allow_lazy_parsing();
+  if (V8_UNLIKELY(info->block_coverage_enabled())) {
+    info->AllocateSourceRangeMap();
   }
+  info->set_cached_data(&script_data_);
+
+  source->info.reset(info);
+
   // Parser needs to stay alive for finalizing the parsing on the main
   // thread.
   source_->parser.reset(new Parser(source_->info.get()));
   source_->parser->DeserializeScopeChain(source_->info.get(),
                                          MaybeHandle<ScopeInfo>());
 }
-
 
 void BackgroundParsingTask::Run() {
   DisallowHeapAllocation no_allocation;
@@ -65,11 +69,6 @@ void BackgroundParsingTask::Run() {
   uintptr_t stack_limit = GetCurrentStackPosition() - stack_size_ * KB;
   source_->parser->set_stack_limit(stack_limit);
 
-  // Nullify the Isolate temporarily so that the background parser doesn't
-  // accidentally use it.
-  Isolate* isolate = source_->info->isolate();
-  source_->info->set_isolate(nullptr);
-
   source_->parser->ParseOnBackground(source_->info.get());
 
   if (script_data_ != nullptr) {
@@ -80,7 +79,7 @@ void BackgroundParsingTask::Run() {
     delete script_data_;
     script_data_ = nullptr;
   }
-  source_->info->set_isolate(isolate);
 }
+
 }  // namespace internal
 }  // namespace v8

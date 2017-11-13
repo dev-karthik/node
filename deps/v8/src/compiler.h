@@ -22,6 +22,10 @@ class CompilationJob;
 class JavaScriptFrame;
 class ParseInfo;
 class ScriptData;
+template <typename T>
+class ThreadedList;
+template <typename T>
+class ThreadedListZoneEntry;
 
 // The V8 compiler API.
 //
@@ -33,11 +37,9 @@ class ScriptData;
 // parameters which then can be executed. If the source code contains other
 // functions, they might be compiled and allocated as part of the compilation
 // of the source code or deferred for lazy compilation at a later point.
-class Compiler : public AllStatic {
+class V8_EXPORT_PRIVATE Compiler : public AllStatic {
  public:
   enum ClearExceptionFlag { KEEP_EXCEPTION, CLEAR_EXCEPTION };
-  enum ConcurrencyMode { NOT_CONCURRENT, CONCURRENT };
-  enum CompilationTier { INTERPRETED, BASELINE, OPTIMIZED };
 
   // ===========================================================================
   // The following family of methods ensures a given function is compiled. The
@@ -45,16 +47,15 @@ class Compiler : public AllStatic {
   // whereas successful compilation ensures the {is_compiled} predicate on the
   // given function holds (except for live-edit, which compiles the world).
 
+  static bool Compile(Handle<SharedFunctionInfo> shared,
+                      ClearExceptionFlag flag);
   static bool Compile(Handle<JSFunction> function, ClearExceptionFlag flag);
-  static bool CompileBaseline(Handle<JSFunction> function);
   static bool CompileOptimized(Handle<JSFunction> function, ConcurrencyMode);
-  static bool CompileDebugCode(Handle<JSFunction> function);
-  static bool CompileDebugCode(Handle<SharedFunctionInfo> shared);
   static MaybeHandle<JSArray> CompileForLiveEdit(Handle<Script> script);
 
   // Prepare a compilation job for unoptimized code. Requires ParseAndAnalyse.
-  static CompilationJob* PrepareUnoptimizedCompilationJob(
-      CompilationInfo* info);
+  static CompilationJob* PrepareUnoptimizedCompilationJob(ParseInfo* parse_info,
+                                                          Isolate* isolate);
 
   // Generate and install code from previously queued compilation job.
   static bool FinalizeCompilationJob(CompilationJob* job);
@@ -64,18 +65,17 @@ class Compiler : public AllStatic {
   // offer this chance, optimized closure instantiation will not call this.
   static void PostInstantiation(Handle<JSFunction> function, PretenureFlag);
 
-  // Parser::Parse, then Compiler::Analyze.
-  static bool ParseAndAnalyze(ParseInfo* info);
-  // Rewrite, analyze scopes, and renumber.
-  static bool Analyze(ParseInfo* info);
-  // Adds deoptimization support, requires ParseAndAnalyze.
-  static bool EnsureDeoptimizationSupport(CompilationInfo* info);
-  // Ensures that bytecode is generated, calls ParseAndAnalyze internally.
-  static bool EnsureBytecode(CompilationInfo* info);
+  typedef ThreadedList<ThreadedListZoneEntry<FunctionLiteral*>>
+      EagerInnerFunctionLiterals;
 
-  // The next compilation tier which the function should  be compiled to for
-  // optimization. This is used as a hint by the runtime profiler.
-  static CompilationTier NextCompilationTier(JSFunction* function);
+  // Parser::Parse, then Compiler::Analyze.
+  static bool ParseAndAnalyze(ParseInfo* parse_info,
+                              Handle<SharedFunctionInfo> shared_info,
+                              Isolate* isolate);
+  // Rewrite, analyze scopes, and renumber. If |eager_literals| is non-null, it
+  // is appended with inner function literals which should be eagerly compiled.
+  static bool Analyze(ParseInfo* parse_info,
+                      EagerInnerFunctionLiterals* eager_literals = nullptr);
 
   // ===========================================================================
   // The following family of methods instantiates new functions for scripts or
@@ -90,15 +90,21 @@ class Compiler : public AllStatic {
   MUST_USE_RESULT static MaybeHandle<JSFunction> GetFunctionFromEval(
       Handle<String> source, Handle<SharedFunctionInfo> outer_info,
       Handle<Context> context, LanguageMode language_mode,
-      ParseRestriction restriction, int eval_scope_position, int eval_position,
-      int line_offset = 0, int column_offset = 0,
-      Handle<Object> script_name = Handle<Object>(),
+      ParseRestriction restriction, int parameters_end_pos,
+      int eval_scope_position, int eval_position, int line_offset = 0,
+      int column_offset = 0, Handle<Object> script_name = Handle<Object>(),
       ScriptOriginOptions options = ScriptOriginOptions());
+
+  // Returns true if the embedder permits compiling the given source string in
+  // the given context.
+  static bool CodeGenerationFromStringsAllowed(Isolate* isolate,
+                                               Handle<Context> context,
+                                               Handle<String> source);
 
   // Create a (bound) function for a String source within a context for eval.
   MUST_USE_RESULT static MaybeHandle<JSFunction> GetFunctionFromString(
       Handle<Context> context, Handle<String> source,
-      ParseRestriction restriction);
+      ParseRestriction restriction, int parameters_end_pos);
 
   // Create a shared function info object for a String source within a context.
   static Handle<SharedFunctionInfo> GetSharedFunctionInfoForScript(
@@ -107,7 +113,7 @@ class Compiler : public AllStatic {
       Handle<Object> source_map_url, Handle<Context> context,
       v8::Extension* extension, ScriptData** cached_data,
       ScriptCompiler::CompileOptions compile_options,
-      NativesFlag is_natives_code, bool is_module);
+      NativesFlag is_natives_code);
 
   // Create a shared function info object for a Script that has already been
   // parsed while the script was being loaded from a streamed source.
@@ -115,8 +121,9 @@ class Compiler : public AllStatic {
       Handle<Script> script, ParseInfo* info, int source_length);
 
   // Create a shared function info object (the code may be lazily compiled).
-  static Handle<SharedFunctionInfo> GetSharedFunctionInfo(
-      FunctionLiteral* node, Handle<Script> script, CompilationInfo* outer);
+  static Handle<SharedFunctionInfo> GetSharedFunctionInfo(FunctionLiteral* node,
+                                                          Handle<Script> script,
+                                                          Isolate* isolate);
 
   // Create a shared function info object for a native function literal.
   static Handle<SharedFunctionInfo> GetSharedFunctionInfoForNative(
@@ -133,7 +140,7 @@ class Compiler : public AllStatic {
 
   // Generate and return optimized code for OSR, or empty handle on failure.
   MUST_USE_RESULT static MaybeHandle<Code> GetOptimizedCodeForOSR(
-      Handle<JSFunction> function, BailoutId osr_ast_id,
+      Handle<JSFunction> function, BailoutId osr_offset,
       JavaScriptFrame* osr_frame);
 };
 
@@ -146,7 +153,7 @@ class Compiler : public AllStatic {
 //
 // Each of the three phases can either fail or succeed. The current state of
 // the job can be checked using {state()}.
-class CompilationJob {
+class V8_EXPORT_PRIVATE CompilationJob {
  public:
   enum Status { SUCCEEDED, FAILED };
   enum class State {
@@ -157,13 +164,9 @@ class CompilationJob {
     kFailed,
   };
 
-  CompilationJob(Isolate* isolate, CompilationInfo* info,
+  CompilationJob(Isolate* isolate, ParseInfo* parse_info, CompilationInfo* info,
                  const char* compiler_name,
-                 State initial_state = State::kReadyToPrepare)
-      : info_(info),
-        compiler_name_(compiler_name),
-        state_(initial_state),
-        stack_limit_(isolate->stack_guard()->real_climit()) {}
+                 State initial_state = State::kReadyToPrepare);
   virtual ~CompilationJob() {}
 
   // Prepare the compile job. Must be called on the main thread.
@@ -192,9 +195,16 @@ class CompilationJob {
   void set_stack_limit(uintptr_t stack_limit) { stack_limit_ = stack_limit; }
   uintptr_t stack_limit() const { return stack_limit_; }
 
+  bool executed_on_background_thread() const {
+    DCHECK_IMPLIES(!can_execute_on_background_thread(),
+                   !executed_on_background_thread_);
+    return executed_on_background_thread_;
+  }
   State state() const { return state_; }
-  CompilationInfo* info() const { return info_; }
+  ParseInfo* parse_info() const { return parse_info_; }
+  CompilationInfo* compilation_info() const { return compilation_info_; }
   Isolate* isolate() const;
+  virtual size_t AllocatedMemory() const { return 0; }
 
  protected:
   // Overridden by the actual implementation.
@@ -202,18 +212,18 @@ class CompilationJob {
   virtual Status ExecuteJobImpl() = 0;
   virtual Status FinalizeJobImpl() = 0;
 
-  // Registers weak object to optimized code dependencies.
-  // TODO(turbofan): Move this to pipeline.cc once Crankshaft dies.
-  void RegisterWeakObjectsInOptimizedCode(Handle<Code> code);
-
  private:
-  CompilationInfo* info_;
+  // TODO(6409): Remove parse_info once Fullcode and AstGraphBuilder are gone.
+  ParseInfo* parse_info_;
+  CompilationInfo* compilation_info_;
+  ThreadId isolate_thread_id_;
   base::TimeDelta time_taken_to_prepare_;
   base::TimeDelta time_taken_to_execute_;
   base::TimeDelta time_taken_to_finalize_;
   const char* compiler_name_;
   State state_;
   uintptr_t stack_limit_;
+  bool executed_on_background_thread_;
 
   MUST_USE_RESULT Status UpdateState(Status status, State next_state) {
     if (status == SUCCEEDED) {
